@@ -116,6 +116,9 @@ def decide(goal: str, marks: list[dict], step: int, last_failed: bool) -> dict[s
         if t:
             return {"type": "click", "index": t["id"],
                     "reason": "Downloading the most recent statement.", "confidence": 0.91}
+        # Target not marked yet: it is below the fold. A real VLM scrolls too.
+        return {"type": "scroll", "direction": "down",
+                "reason": "The download control is not visible; scrolling.", "confidence": 0.7}
 
     # Search / type path
     if "search" in g or "type" in g or "enter" in g:

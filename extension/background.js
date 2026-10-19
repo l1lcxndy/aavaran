@@ -383,6 +383,11 @@ function assertCapturable(tab) {
 }
 
 async function captureTab(tab) {
+  // captureVisibleTab grabs whatever is visible in the window. If that is not
+  // the tab whose DOM we inventoried, every DOM-channel box (passwords!) would
+  // land on the wrong pixels.
+  const live = await chrome.tabs.get(tab.id);
+  if (!live.active) throw new Error('the target tab is not the visible tab in its window — switch back to it');
   const wait = CAPTURE_MIN_INTERVAL_MS - (Date.now() - lastCaptureAt);
   if (wait > 0) await sleep(wait);
 
@@ -1188,7 +1193,8 @@ const EGRESS_PATTERNS = [
 // be caught if it ever showed up there (it won't, since PNG bytes are binary,
 // but this keeps the guard from special-casing away real coverage).
 const OPAQUE_FIELDS = [
-  'frame_png_b64', 'image', 'pixel_hash', 'pixelHash', 'session',
+  // delta: mode/rect/changeRatio — a float like 0.0651234567890125 reads as a card.
+  'frame_png_b64', 'image', 'pixel_hash', 'pixelHash', 'session', 'delta',
   'mark_signature', 'markSignature',
 ];
 
@@ -1382,7 +1388,11 @@ function mapServerAction(a) {
 async function vaultManifest(sessionId) {
   const vault = {};
   for (const r of await vaultAll()) {
-    if (r.sessionId === sessionId) vault[r.token] = { kind: r.kind, origin: r.origin || '' };
+    // A value first seen by a panel Capture (no session) keeps that row: the
+    // run re-uses its token without minting a new one, so include it too.
+    if (r.sessionId === sessionId || r.sessionId === null) {
+      vault[r.token] = { kind: r.kind, origin: r.origin || '' };
+    }
   }
   return vault;
 }
@@ -1763,6 +1773,13 @@ async function runAgent({ goal, tabId }) {
  * 14. Message router
  * ========================================================================== */
 
+/** The page a panel request is about: the tab the expanded Glass Box was
+ *  opened for, else the active tab of the popup's window. */
+async function targetTab(message) {
+  if (message.tabId) return chrome.tabs.get(message.tabId);
+  return (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Messages addressed to the offscreen document also reach this listener;
   // claiming them here would resolve the sender's promise with the wrong value.
@@ -1803,7 +1820,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // miss; the controls come from the DOM. Raw text stays in the extension.
     async AAVARAN_NARRATE() {
       const cfg = await getConfig();
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = await targetTab(message);
       const frame = await captureAndVeil(tab, cfg, { narrate: true });
       return {
         ok: true,
@@ -1817,7 +1834,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     async AAVARAN_CAPTURE() {
       const cfg = await getConfig();
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = await targetTab(message);
       const frame = await captureAndVeil(tab, cfg);
       return {
         ok: true,

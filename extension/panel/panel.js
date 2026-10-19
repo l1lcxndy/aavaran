@@ -18,6 +18,10 @@
 
 const $ = (id) => document.getElementById(id);
 
+// Expanded mode: a standalone window bound to one page tab (?tab=<id>).
+const TARGET_TAB = Number(new URLSearchParams(location.search).get('tab')) || null;
+if (TARGET_TAB) document.body.classList.add('wide');
+
 const el = {
   banner: $('banner'),
   goal: $('goal'),
@@ -50,7 +54,7 @@ const el = {
  * -------------------------------------------------------------------------- */
 async function send(type, extra = {}, retry = true) {
   try {
-    const res = await chrome.runtime.sendMessage({ type, ...extra });
+    const res = await chrome.runtime.sendMessage({ type, tabId: TARGET_TAB || undefined, ...extra });
     if (res && res.ok === false) throw Object.assign(new Error(res.error || type + ' failed'), { blocked: res.blocked });
     return res;
   } catch (e) {
@@ -246,7 +250,10 @@ async function doCapture() {
       ['ocr', v.ocrOk ? 'ok' : 'FAILED', v.ocrOk ? 'good' : 'bad'],
       ['words scanned', v.wordsScanned ?? 0],
       ['text regions destroyed', v.textRegionsRedacted ?? 0, (v.textRegionsRedacted ? 'good' : '')],
-      ['faces destroyed', v.facesRedacted ?? 0, (v.facesRedacted ? 'good' : '')],
+      ['faces destroyed', v.faceOk ? (v.facesRedacted ?? 0) : 'model down', v.faceOk ? (v.facesRedacted ? 'good' : '') : 'bad'],
+      // Regions destroyed on suspicion: unreadable/labelled values, and every
+      // image region whenever the face model is unavailable.
+      ['fail-closed regions', v.failClosedRegions ?? 0, (v.failClosedRegions ? 'good' : '')],
       ['marks', r.marks.length],
       ['latency', (r.ms ?? 0) + ' ms'],
       ['pixel hash', String(r.pixelHash || '').slice(0, 12)],
@@ -337,6 +344,17 @@ async function doNarrate() {
 }
 
 el.btnNarrate.addEventListener('click', doNarrate);
+
+// Popups are capped at 800x600 by Chrome; the expanded Glass Box is its own
+// window so the page tab stays the visible one in its window for capture.
+$('btnExpand').addEventListener('click', async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  await chrome.windows.create({
+    url: chrome.runtime.getURL(`panel/index.html?tab=${tab.id}`),
+    type: 'popup', width: 1440, height: 940,
+  });
+  window.close();
+});
 el.btnCapture.addEventListener('click', doCapture);
 el.btnRun.addEventListener('click', doRun);
 el.btnStop.addEventListener('click', () => send('AAVARAN_STOP').catch((e) => logLine('stop', e.message, true)));

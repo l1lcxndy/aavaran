@@ -629,7 +629,10 @@ async function initFaces() {
       }
     }
     if (!FACE.backend) throw new Error('no usable tfjs backend');
-    await faceapi.nets.tinyFaceDetector.loadFromUri(chrome.runtime.getURL('libs/models'));
+    // Path only: face-api's URI parser knows http(s):// and turns
+    // "chrome-extension://id/x" into "chrome-extension:/id/x", which 404s.
+    const modelPath = new URL(chrome.runtime.getURL('libs/models'), location.href).pathname;
+    await faceapi.nets.tinyFaceDetector.loadFromUri(modelPath);
     FACE.loaded = true;
     log(`face-api ready (${FACE.backend}) in ${Math.round(performance.now() - t0)}ms`);
     return true;
@@ -1489,7 +1492,10 @@ async function veil(payload) {
     const pick = AAVARAN_DELTA.choose(diff, grid, {
       forceFull: !!payload.forceFull, stepsSinceKeyframe: RUN.sinceKeyframe,
     });
-    delta = { mode: pick.mode, reason: pick.reason, changeRatio: diff.ratio, rect: pick.rect || null };
+    delta = {
+      mode: pick.mode, reason: pick.reason,
+      changeRatio: Math.round(diff.ratio * 1e4) / 1e4, rect: pick.rect || null,
+    };
     if (pick.mode === 'patch') {
       const [x, y, w, h] = pick.rect;
       const { canvas: crop, ctx: cropCtx } = makeCanvas(w, h);

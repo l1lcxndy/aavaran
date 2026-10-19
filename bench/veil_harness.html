@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Veil harness</title>
+<style>body{font:13px ui-monospace,Consolas,monospace;margin:16px;background:#0b0d10;color:#e6edf3}
+img{max-width:48%;border:1px solid #333;margin:4px}</style>
+</head>
+<body>
+<!-- Runs the extension's real veil() (Tesseract + face-api + NER + rules) in a
+     plain page. Serve the repo root:  python -m http.server 8770
+     then open http://127.0.0.1:8770/bench/veil_harness.html?n=20 -->
+<canvas id="veilCanvas" width="1" height="1" hidden></canvas>
+<script>
+  // Minimal stand-in for the extension runtime: assets resolve under /extension/.
+  globalThis.chrome = { runtime: { getURL: (p) => '/extension/' + p, onMessage: { addListener() {} } } };
+</script>
+<script src="/extension/libs/tesseract.min.js"></script>
+<script src="/extension/libs/face-api.min.js"></script>
+<script src="/extension/delta.js"></script>
+<script src="/extension/offscreen.hardening.js"></script>
+<script src="/extension/pii.hardening.js"></script>
+<script src="/extension/offscreen.js"></script>
+<pre id="out">loading…</pre>
+<div id="frames"></div>
+<script src="veil_harness.js"></script>
+</body>
+</html>

@@ -6,3 +6,9 @@ node_modules/
 .DS_Store
 .vscode/
 .idea/
+.venv/
+audit.jsonl
+bench/pages/
+dist/
+extension/libs/
+server/.pytest_cache/

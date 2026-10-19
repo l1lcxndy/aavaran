@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AAVARAN background (Firefox)</title>
+  <!--
+    Firefox MV3 has no offscreen documents, but its background is a real page
+    with a DOM. The veil engine (offscreen.js) loads here, before the module
+    worker logic, and background.js calls it directly (self.AAVARAN_OFFSCREEN).
+  -->
+  <script src="libs/tesseract.min.js"></script>
+  <script src="libs/face-api.min.js"></script>
+  <script src="delta.js"></script>
+  <script src="offscreen.hardening.js"></script>
+  <script src="pii.hardening.js"></script>
+  <script src="offscreen.js"></script>
+  <script type="module" src="background.js"></script>
+</head>
+<body>
+  <canvas id="veilCanvas" width="1" height="1"></canvas>
+</body>
+</html>

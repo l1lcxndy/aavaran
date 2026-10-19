@@ -1,22 +1,28 @@
 {
   "manifest_version": 3,
   "name": "AAVARAN",
-  "version": "0.1.0",
-  "description": "Privacy-preserving on-device visual perception for browser agents",
+  "version": "1.0.0",
+  "description": "On-device visual perception for browser agents. PII pixels are destroyed locally before any egress.",
+  "minimum_chrome_version": "116",
   "permissions": [
     "activeTab",
+    "scripting",
     "offscreen",
     "storage",
-    "scripting"
+    "tabs"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "action": {
-    "default_title": "AAVARAN Control Panel"
+    "default_popup": "panel/index.html",
+    "default_title": "AAVARAN"
   },
-  "options_page": "panel/index.html"
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'"
+  }
 }

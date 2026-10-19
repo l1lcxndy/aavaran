@@ -1,10 +1,48 @@
-version: '3.8'
+# One-command bring-up: `docker compose up --build`.
+# Uses the scripted mock VLM unless AAVARAN_VLM_BASE points at a real
+# OpenAI-compatible server (e.g. vLLM serving Qwen2.5-VL-7B-Instruct with
+# --guided-decoding-backend xgrammar, so response_format=json_schema is enforced).
 services:
   server:
     build: ./server
     ports:
-      - "8000:8000"
-    volumes:
-      - ./server:/app
+      - "127.0.0.1:8756:8756"   # loopback only: the extension is the sole client
     environment:
-      - PYTHONUNBUFFERED=1
+      - AAVARAN_VLM_BASE=${AAVARAN_VLM_BASE:-http://mock-vlm:8001/v1}
+      - AAVARAN_VLM_MODEL=${AAVARAN_VLM_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}
+      - AAVARAN_REDIS_URL=redis://redis:6379/0
+      - AAVARAN_AUDIT_DSN=postgresql://aavaran:${AAVARAN_DB_PASSWORD:-aavaran}@postgres:5432/aavaran
+    volumes:
+      - audit:/data              # JSONL fallback if Postgres is unreachable
+    depends_on:
+      mock-vlm:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+  mock-vlm:
+    build: ./server
+    command: ["uvicorn", "mock_vlm:app", "--host", "0.0.0.0", "--port", "8001"]
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]   # sessions are ephemeral by design
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=aavaran
+      - POSTGRES_PASSWORD=${AAVARAN_DB_PASSWORD:-aavaran}
+      - POSTGRES_DB=aavaran
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aavaran"]
+      interval: 5s
+      retries: 10
+volumes:
+  audit:
+  pgdata:

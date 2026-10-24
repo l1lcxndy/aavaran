@@ -3,6 +3,7 @@
   "private": true,
   "description": "AAVARAN — on-device perception, zero-leak egress (SIH26171). Browser libs are vendored by fetch-libs.ps1 at pinned versions (tesseract.js 5.1.1, face-api.js 0.22.2, transformers.js 3.8.1).",
   "scripts": {
+    "start": "powershell -NoProfile -ExecutionPolicy Bypass -File start.ps1",
     "fetch-libs": "pwsh -ExecutionPolicy Bypass -File fetch-libs.ps1",
     "build:firefox": "node scripts/build-firefox.js",
     "bench": "python bench/generate.py && node bench/run_rules.js && python bench/score.py bench/pages/labels.json bench/pages/predictions.json",

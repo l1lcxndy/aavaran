@@ -256,6 +256,12 @@ aavaran/
 
 ## 6. Setup from clean
 
+**Quick start:** double-click `start.cmd` (or `.\start.ps1`; `.\start.ps1 -Local`
+runs Qwen2.5-VL 7B on this machine through Ollama). It creates the venv and
+fetches libs on first run, opens the model, server and page-server windows,
+skips anything already running, and opens the demo page. Then load or reload
+`extension\` in Chrome. The steps below are the same thing by hand.
+
 ```powershell
 # 1. vendored libs + models (~48 MB, one time; NER assets are optional)
 powershell -ExecutionPolicy Bypass -File .\fetch-libs.ps1 -Clean

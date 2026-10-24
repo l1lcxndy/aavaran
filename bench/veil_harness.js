@@ -11,14 +11,17 @@
   const n = Number(q.get('n') || 20);
   const start = Number(q.get('start') || 0);
   const show = Number(q.get('show') || 2);
+  // ?dpr=2 renders a high-DPI capture of the same CSS layout (truth in device px).
+  const dpr = Number(q.get('dpr') || 1);
   // Name rows alternate between labelled and bare prose, so the bare ones can
   // only be caught by the NER model.
   const NAME_LABELS = ['Name', 'Account holder', 'Prepared for'];
 
   function render(items, i) {
     const c = document.createElement('canvas');
-    c.width = W; c.height = H;
+    c.width = W * dpr; c.height = H * dpr;
     const x = c.getContext('2d');
+    x.scale(dpr, dpr);
     x.fillStyle = '#fff'; x.fillRect(0, 0, W, H);
     x.fillStyle = '#111'; x.font = 'bold 30px Arial'; x.fillText('Account profile', 60, 60);
     x.font = '22px Arial';
@@ -29,7 +32,7 @@
       x.fillText(label, 60, y);
       x.fillText(it.value, 330, y);
       const m = x.measureText(it.value);
-      truth.push({ ...it, box: [330, y - m.actualBoundingBoxAscent, 330 + m.width, y + m.actualBoundingBoxDescent] });
+      truth.push({ ...it, box: [330, y - m.actualBoundingBoxAscent, 330 + m.width, y + m.actualBoundingBoxDescent].map((v) => v * dpr) });
     });
     x.fillStyle = '#1f6feb'; x.fillRect(60, H - 90, 140, 44);
     x.fillStyle = '#fff'; x.fillText('Submit', 95, H - 60);

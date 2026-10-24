@@ -73,4 +73,27 @@ const b = ids.assign([{ role: 'button', name: 'New', bbox: [0, 0, 50, 20] }, { r
 assert.strictEqual(a[1].id, b[1].id);
 assert.notStrictEqual(a[0].id, b[0].id);
 
-console.log('veil rule tests ok');
+// Detection reuse key: an identical call reuses; any changed byte does not.
+(async () => {
+  const base = {
+    rawDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==',
+    domMarks: [{ idx: 0, role: 'textbox', name: 'PAN', value: 'ABCPD1234F', rect: { x: 10, y: 20, w: 100, h: 24 } }],
+    opaque: [], viewport: { cssWidth: 1280, cssHeight: 720, url: 'https://x.test/' },
+    knownTokens: { ['a'.repeat(64)]: '<PII:PAN#1>' }, config: {},
+  };
+  const key = (p) => ctx.veilReuseKey(p);
+  const k0 = await key(base);
+  assert.match(k0, /^[0-9a-f]{64}$/);
+  assert.strictEqual(await key(JSON.parse(JSON.stringify(base))), k0);
+  const raw = base.rawDataUrl;
+  for (let i = raw.indexOf(',') + 1; i < raw.length; i++) {
+    const flipped = raw.slice(0, i) + (raw[i] === 'A' ? 'B' : 'A') + raw.slice(i + 1);
+    assert.notStrictEqual(await key({ ...base, rawDataUrl: flipped }), k0, `byte ${i}`);
+  }
+  const mark = (patch) => ({ ...base, domMarks: [{ ...base.domMarks[0], ...patch }] });
+  assert.notStrictEqual(await key(mark({ value: 'ABCPD1234G' })), k0);
+  assert.notStrictEqual(await key(mark({ rect: { x: 10, y: 21, w: 100, h: 24 } })), k0);
+  assert.notStrictEqual(await key({ ...base, knownTokens: { ...base.knownTokens, ['b'.repeat(64)]: '<PII:PAN#2>' } }), k0);
+  assert.notStrictEqual(await key({ ...base, config: { redactionPad: 0 } }), k0);
+  console.log('veil rule tests ok');
+})().catch((e) => { console.error(e); process.exit(1); });

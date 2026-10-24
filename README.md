@@ -180,10 +180,12 @@ region only), `full` (keyframe, forced on URL change and every 8 steps).
 
 | Metric (deck target) | Measured | Notes |
 |---|---|---|
-| PII recall (≥ 0.95) | **0.985** (1,076 / 1,092 fields) | NAME 0.94, PAN 0.97, UPI 0.98, AADHAAR / PHONE / EMAIL / IFSC 1.00 |
-| Precision | 0.997 (3 spurious of 1,039 boxes) | |
-| Mask IoU (≥ 0.92) | **0.98** detector geometry (`?pad=0`); 0.63 as shipped | the shipped 4 px safety dilation is scored against glyph-tight truth |
-| Veil latency per frame | median 335 ms, **p95 452 ms** | OCR 283 ms, faces 43 ms, NER 6 ms (WASM-SIMD) |
+| PII recall (≥ 0.95) | **0.949** (1,036 / 1,092 fields), identical before/after the latency work | AADHAAR 0.96, PAN 0.96, PHONE 0.95, IFSC 0.95, UPI 0.95, EMAIL 0.96, NAME 0.91. 45 of the 56 misses sit on the 8 pages where tinyFaceDetector fires on the form: the merged face box drags the field's IoU under 0.5. The earlier 0.985 does not reproduce at b0c83b4 |
+| Precision | 0.990 | |
+| Mask IoU (≥ 0.92) | **0.984** detector geometry (`?pad=0`); 0.66 as shipped | the shipped 4 px safety dilation is scored against glyph-tight truth |
+| Veil latency, 1280×720, DPR 1 | median 313–362 ms, p95 408–472 ms (before: 300–415 / 364–513) | OCR ~300 ms dominates; faces (~40 ms) now overlap OCR, so the gain is within run-to-run noise here |
+| Veil latency, `?dpr=2` (2560×1440 capture) | median 382–460 ms, p95 485–561 ms (before: 522–529 / 661–725) | OCR input capped at 1.5× CSS px (`ocrCssScale`): 1920 px instead of 2560 px, recall unchanged (0.979) |
+| Repeat of an identical frame (same run) | 14 ms (vs 168 ms recomputed) | exact SHA-256 key over capture bytes + DOM marks + vault keys; faces/OCR/NER skipped |
 | Delta egress | one-word change: 3,966 B patch vs 26,006 B frame | patch pasted server-side reproduces the frame pixel-exactly |
 
 **Local model** (`start.ps1 -Local`, Qwen2.5-VL 7B Q4 via Ollama, RTX 5060 Laptop 8 GB):
@@ -200,6 +202,10 @@ model file omits (default ≈ 2 MP); `scripts/make-local-model.py` writes it as
 automatic repair — the validator rejects invented identifiers such as
 `123456789012`), "pay the bill" → Confirm and Pay 2/2 and flagged for
 confirmation. 1536 px frames scored worse, so egress now defaults to 1024 px.
+
+Latency ranges are two interleaved before/after runs (n=200 at DPR 1, n=100
+at DPR 2) in a visible Chrome; runs where the GPU was contended (1 s encode
+stalls, seen in both builds) were discarded.
 
 Remaining misses are OCR errors the rules cannot see through (`B`→`8` in a
 PAN, a UPI handle split into two words) and names NER scores below its floor.

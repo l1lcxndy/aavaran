@@ -46,6 +46,10 @@ const DEFAULTS = Object.freeze({
   // Long edge used for OCR. OCR accuracy is resolution-bound, so this stays
   // near native. Above ~3000px Tesseract cost grows faster than its recall.
   ocrMaxEdge: 3000,
+  // OCR scale cap relative to CSS px. A DPR-2 capture is downscaled to 1.5x
+  // CSS, so 13-14 px body text still reaches Tesseract ~20 px tall (more than
+  // a DPR-1 screen ever gives it) at ~half the pixels of the native grab.
+  ocrCssScale: 1.5,
   // Long edge for face detection. tinyFaceDetector internally resizes to 416.
   faceMaxEdge: 2048,
   // Words below this Tesseract confidence are treated as unreadable. Anything
@@ -980,6 +984,22 @@ async function markSignature(marks) {
     .map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+/**
+ * Exact-match key for detection reuse: every capture byte plus every input
+ * that shapes redaction. Deliberately no downscaled or perceptual component:
+ * a coarse key would reuse stale boxes after new PII is painted.
+ */
+async function veilReuseKey(payload) {
+  const meta = JSON.stringify([
+    payload.domMarks || [], payload.opaque || [], payload.viewport || {}, payload.config || {},
+    Object.entries(payload.knownTokens || {}).sort(),
+  ]);
+  // JSON escapes newlines, so this separator cannot be forged by the meta part.
+  const bytes = new TextEncoder().encode(`${meta}\n${payload.rawDataUrl || ''}`);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 /* ==========================================================================
  * 6. Set-of-Mark renderer
  * ========================================================================== */
@@ -1077,6 +1097,7 @@ async function veil(payload) {
     RUN.ids = new AAVARAN_DELTA.StableMarkIds();
     RUN.grid = null;
     RUN.sinceKeyframe = 0;
+    RUN.reuse = null;
   }
 
   const timings = {};
@@ -1128,7 +1149,16 @@ async function veil(payload) {
     h: (b[3] - b[1]) / dprY,
   });
 
-  /* ---- 6.3 face detection ------------------------------------------------ */
+  /* An identical repeat of the previous frame in this run (same bytes, same
+   * DOM, same vault) reuses its detections and skips faces/OCR/NER. */
+  const reuseKey = track ? await veilReuseKey(payload) : null;
+  const reused = reuseKey && RUN.reuse && RUN.reuse.key === reuseKey ? RUN.reuse : null;
+  const stageWarnings = warnings.length;
+
+  /* ---- 6.3 face detection ------------------------------------------------ *
+   * Started here, awaited after OCR: tfjs runs on this thread while Tesseract
+   * runs in its worker, so the two overlap. NER needs OCR text and stays after.
+   * ----------------------------------------------------------------------- */
   /** @type {number[][]} device-px boxes */
   const redactions = [];
   /** @type {{box:number[], token:string, kind:string}[]} */
@@ -1138,7 +1168,7 @@ async function veil(payload) {
   const faceBoxes = [];
   let faceOk = false;
 
-  if (cfg.enableFaces && cfg.kinds.FACE) {
+  const faceStage = !reused && cfg.enableFaces && cfg.kinds.FACE && (async () => {
     const tf0 = performance.now();
     let tensor = null;
     try {
@@ -1169,7 +1199,7 @@ async function veil(payload) {
       if (tensor && typeof tensor.dispose === 'function') tensor.dispose();
     }
     timings.faces = Math.round(performance.now() - tf0);
-  }
+  })();
 
   /* ---- 6.4 OCR → PII spans → device-px boxes ----------------------------- */
   const vault = new TokenVault(payload.knownTokens);
@@ -1187,7 +1217,7 @@ async function veil(payload) {
   let extraRules = [];
   let nerDone = false;
 
-  if (cfg.enableOcr) {
+  if (!reused && cfg.enableOcr) {
     const to0 = performance.now();
     try {
       const assetProblems = await assertLocalAssets();
@@ -1195,7 +1225,8 @@ async function veil(payload) {
         throw new Error(`local asset preflight failed → ${assetProblems.join('; ')}`);
       }
 
-      const { canvas: ocrCanvas, scale } = scaledCopy(full, cfg.ocrMaxEdge);
+      const ocrEdge = Math.min(cfg.ocrMaxEdge, Math.max(vvW, vvH) * cfg.ocrCssScale);
+      const { canvas: ocrCanvas, scale } = scaledCopy(full, ocrEdge);
       ocrScale = scale;
       const data = await ocrRecognize(await canvasToBlob(ocrCanvas));
       ocrWords = relineWords(flattenWords(data).filter((w) => w.text && w.text.trim() && w.bbox));
@@ -1254,7 +1285,8 @@ async function veil(payload) {
     }
     timings.ocr = Math.round(performance.now() - to0);
   }
-  if (!nerDone) extraRules = await nerRules(nerTexts, timings, warnings);
+  if (!reused && !nerDone) extraRules = await nerRules(nerTexts, timings, warnings);
+  if (faceStage) await faceStage;   // never rejects: failure leaves faceOk false
 
   // tinyFaceDetector at a recall-first threshold fires on dense text blocks;
   // one such hit blacked out a whole identity card, labels included, which
@@ -1266,6 +1298,29 @@ async function veil(payload) {
     }
     redactions.push(box);
     facesRedacted++;
+  }
+
+  if (reused) {
+    ({ faceOk, ocrOk, facesRedacted, wordsScanned, ocrWords, ocrScale, textRegions,
+      failClosedRegions, extraRules } = reused);
+    // Same knownTokens, same order: the vault re-issues the identical tokens
+    // (and newVaultEntries) the original pass produced.
+    for (const f of reused.fresh) await vault.tokenFor(f.kind, f.value);
+    redactions.push(...reused.redactions);
+    redactionLabels.push(...reused.redactionLabels);
+    piiFound.push(...reused.piiFound);
+    warnings.push(...reused.warnings);
+    timings.reused = true;
+  } else if (track) {
+    // Only a fully successful pass is reusable; a failed stage must retry.
+    const complete = (!cfg.enableOcr || ocrOk) && (!(cfg.enableFaces && cfg.kinds.FACE) || faceOk);
+    RUN.reuse = complete ? {
+      key: reuseKey, faceOk, ocrOk, facesRedacted, wordsScanned, ocrWords, ocrScale,
+      textRegions, failClosedRegions, extraRules,
+      fresh: vault.fresh.slice(), redactions: redactions.slice(),
+      redactionLabels: redactionLabels.slice(), piiFound: piiFound.slice(),
+      warnings: warnings.slice(stageWarnings),
+    } : null;
   }
 
   /* Face model down: "0 faces" would be a lie, the truth is "unknown". Destroy
@@ -1617,7 +1672,7 @@ async function veil(payload) {
  * ========================================================================== */
 
 /** Per-run veil state; reset whenever a new sessionId arrives. */
-const RUN = { sessionId: null, ids: null, grid: null, sinceKeyframe: 0 };
+const RUN = { sessionId: null, ids: null, grid: null, sinceKeyframe: 0, reuse: null };
 
 let busy = false;
 

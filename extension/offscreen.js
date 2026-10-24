@@ -39,9 +39,10 @@
 
 const DEFAULTS = Object.freeze({
   // Long edge of the frame that is actually transmitted. Qwen2.5-VL bills by
-  // area (~1 token per 28x28 patch after 2x2 merge); 1536 keeps SoM labels
-  // crisply legible at roughly a quarter of the token cost of a native 4K grab.
-  egressMaxEdge: 1536,
+  // area (~1 token per 28x28 patch after 2x2 merge). Measured on a local
+  // Qwen2.5-VL 7B: 1024 px was more accurate than 1536 (9/9 vs 3/6 on token
+  // fills and confirmations) at ~60% of the image tokens.
+  egressMaxEdge: 1024,
   // Long edge used for OCR. OCR accuracy is resolution-bound, so this stays
   // near native. Above ~3000px Tesseract cost grows faster than its recall.
   ocrMaxEdge: 3000,
@@ -878,6 +879,26 @@ function normBox(x0, y0, x1, y1, pad, w, h) {
 
 function boxArea(b) { return Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]); }
 
+/**
+ * True when a detected "face" box is mostly confidently-read text: >= 6 words
+ * at OCR confidence >= 70 covering >= 10% of its area. A real face yields at
+ * most a few low-confidence fragments.
+ * @param {number[]} box device px; words carry OCR-scale bboxes (divide by scale)
+ */
+function isTextBlock(box, words, scale) {
+  let n = 0;
+  let covered = 0;
+  for (const w of words) {
+    if (w.confidence < 70) continue;
+    const wb = [w.bbox.x0 / scale, w.bbox.y0 / scale, w.bbox.x1 / scale, w.bbox.y1 / scale];
+    const inter = boxIntersect(box, wb);
+    if (!inter) continue;
+    n++;
+    covered += boxArea(inter);
+  }
+  return n >= 6 && covered / boxArea(box) >= 0.10;
+}
+
 function boxIntersect(a, b) {
   const x0 = Math.max(a[0], b[0]);
   const y0 = Math.max(a[1], b[1]);
@@ -1113,6 +1134,8 @@ async function veil(payload) {
   /** @type {{box:number[], token:string, kind:string}[]} */
   const redactionLabels = [];
   let facesRedacted = 0;
+  /** @type {number[][]} face boxes, filtered against OCR text before redaction */
+  const faceBoxes = [];
   let faceOk = false;
 
   if (cfg.enableFaces && cfg.kinds.FACE) {
@@ -1132,13 +1155,12 @@ async function veil(payload) {
         // ear and jaw pixels that are individually re-identifiable.
         const padX = width * 0.22;
         const padY = height * 0.28;
-        redactions.push(normBox(
+        faceBoxes.push(normBox(
           (x - padX) / scale, (y - padY) / scale,
           (x + width + padX) / scale, (y + height + padY) / scale,
           cfg.redactionPad, devW, devH,
         ));
       }
-      facesRedacted = dets.length;
       faceOk = true;
     } catch (e) {
       warn('face detection failed:', e);
@@ -1233,6 +1255,18 @@ async function veil(payload) {
     timings.ocr = Math.round(performance.now() - to0);
   }
   if (!nerDone) extraRules = await nerRules(nerTexts, timings, warnings);
+
+  // tinyFaceDetector at a recall-first threshold fires on dense text blocks;
+  // one such hit blacked out a whole identity card, labels included, which
+  // blinds the agent. Without OCR there is no evidence, so every face stays.
+  for (const box of faceBoxes) {
+    if (ocrOk && isTextBlock(box, ocrWords, ocrScale)) {
+      warnings.push('face_rejected_text_block');
+      continue;
+    }
+    redactions.push(box);
+    facesRedacted++;
+  }
 
   /* Face model down: "0 faces" would be a lie, the truth is "unknown". Destroy
    * every image/video/canvas region large enough to hold a face instead. */

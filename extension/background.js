@@ -34,7 +34,7 @@ const DEFAULT_CONFIG = Object.freeze({
   purgeVaultOnSessionEnd: true,
   vaultTtlMs: 30 * 60 * 1000,
   veil: {
-    egressMaxEdge: 1536,
+    egressMaxEdge: 1024,
     ocrMaxEdge: 3000,
     ocrConfFloor: 55,
     redactionPad: 4,
@@ -1752,12 +1752,17 @@ async function runAgent({ goal, tabId }) {
       outcome = { status: 'exhausted', reason: `step budget of ${cfg.maxSteps} exhausted` };
     }
   } catch (e) {
-    fail('run failed:', e);
-    outcome = {
-      status: e.egressBlock ? 'egress_blocked' : (e.blocked ? 'veil_blocked' : 'error'),
-      reason: e.message,
-    };
-    emit('run-error', { status: outcome.status, error: e.message });
+    // Stop pressed mid-request surfaces as an AbortError from fetch.
+    if (abort.signal.aborted) {
+      outcome = { status: 'aborted', reason: 'user_stop' };
+    } else {
+      fail('run failed:', e);
+      outcome = {
+        status: e.egressBlock ? 'egress_blocked' : (e.blocked ? 'veil_blocked' : 'error'),
+        reason: e.message,
+      };
+      emit('run-error', { status: outcome.status, error: e.message });
+    }
   } finally {
     const sessionId = currentRun.sessionId;
     emit('run-end', { ...outcome, ...runSnapshot(), durationMs: Date.now() - currentRun.startedAt });

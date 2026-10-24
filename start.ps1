@@ -10,12 +10,14 @@
 # Close a window to stop that piece.
 #
 #   .\start.ps1            mock model
-#   .\start.ps1 -Local     Qwen2.5-VL 7B on this laptop (pulls ~6 GB once)
+#   .\start.ps1 -Local     Qwen2.5-VL 7B on this laptop's GPU (pulls ~6 GB once,
+#                          then builds aavaran-qwen: same weights, vision input
+#                          capped so it fits 8 GB of VRAM)
 # =============================================================================
 
 param(
   [switch]$Local,
-  [string]$LocalModel = 'qwen2.5vl:7b'
+  [string]$BaseModel = 'qwen2.5vl:7b'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,17 +56,35 @@ if (-not (Test-Path (Join-Path $Root 'extension\libs\tesseract.min.js'))) {
 # --- model -------------------------------------------------------------------
 if ($Local) {
   $vlmBase = 'http://127.0.0.1:11434/v1'
-  $vlmModel = $LocalModel
-  if (Test-Port 11434) {
-    Write-Host 'Ollama already running. If it was started by the tray app, its context window may be too small for screenshots; quit it and re-run this script.' -ForegroundColor DarkYellow
-  } else {
-    # One screenshot is ~1,500 tokens; the default context would silently truncate.
-    Start-Window 'ollama' $Root "`$env:OLLAMA_CONTEXT_LENGTH = '16384'; ollama serve"
+  $vlmModel = 'aavaran-qwen'
+  if (-not (Test-Port 11434)) {
+    # 8k context holds two 1024 px frames plus history; flash attention and a
+    # q8 KV cache keep it in VRAM; KEEP_ALIVE -1 stops the idle unload that
+    # would otherwise stall the first step after a pause.
+    Start-Window 'ollama' $Root ("`$env:OLLAMA_CONTEXT_LENGTH = '8192'; `$env:OLLAMA_FLASH_ATTENTION = '1'; " +
+      "`$env:OLLAMA_KV_CACHE_TYPE = 'q8_0'; `$env:OLLAMA_KEEP_ALIVE = '-1'; ollama serve")
     Wait-Port 11434 'Ollama'
   }
-  if (-not ((ollama list) -match [regex]::Escape($LocalModel))) {
-    Write-Host "Pulling $LocalModel (one time, ~6 GB)..." -ForegroundColor Yellow
-    ollama pull $LocalModel
+  $models = ollama list | Out-String
+  if ($models -notmatch [regex]::Escape($BaseModel)) {
+    Write-Host "Pulling $BaseModel (one time, ~6 GB)..." -ForegroundColor Yellow
+    ollama pull $BaseModel
+  }
+  if ($models -notmatch 'aavaran-qwen') {
+    Write-Host 'Building aavaran-qwen (one time, ~1 min; local copy, no download)...' -ForegroundColor Yellow
+    & $Py -m pip install -q gguf
+    & $Py (Join-Path $Root 'scripts\make-local-model.py')
+  }
+  Write-Host 'Loading the model onto the GPU...' -ForegroundColor Yellow
+  $null = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:11434/api/generate' -TimeoutSec 300 `
+    -ContentType 'application/json' -Body '{"model":"aavaran-qwen","prompt":"ok","stream":false,"options":{"num_predict":1}}'
+  $placement = (ollama ps | Select-String 'aavaran-qwen').Line
+  Write-Host "  $placement"
+  if ($placement -notmatch 'Forever') {
+    Write-Host '  This Ollama was not started by this script: the model may unload when idle (slow next step). Close Ollama and re-run for best results.' -ForegroundColor DarkYellow
+  }
+  if ($placement -notmatch '100% GPU') {
+    Write-Host '  Not fully on the GPU: steps will be slow. Close other GPU apps (browsers with many tabs, games) and re-run.' -ForegroundColor DarkYellow
   }
 } else {
   $vlmBase = 'http://127.0.0.1:8001/v1'

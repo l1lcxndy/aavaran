@@ -186,6 +186,21 @@ region only), `full` (keyframe, forced on URL change and every 8 steps).
 | Veil latency per frame | median 335 ms, **p95 452 ms** | OCR 283 ms, faces 43 ms, NER 6 ms (WASM-SIMD) |
 | Delta egress | one-word change: 3,966 B patch vs 26,006 B frame | patch pasted server-side reproduces the frame pixel-exactly |
 
+**Local model** (`start.ps1 -Local`, Qwen2.5-VL 7B Q4 via Ollama, RTX 5060 Laptop 8 GB):
+
+| | stock `qwen2.5vl:7b` | `aavaran-qwen` (same weights, vision input capped) |
+|---|---|---|
+| placement | 100% CPU (0/29 layers on GPU) | **100% GPU** (29/29) |
+| vision scratch memory | 6.7 GiB | 758 MiB |
+| cold load / step with a new 1024 px frame | ~170 s / ~42 s | **10.5 s / 2.3–3.4 s** (whole /act round trip) |
+
+Ollama sizes the vision encoder's memory for `vision.max_pixels`, which the
+model file omits (default ≈ 2 MP); `scripts/make-local-model.py` writes it as
+1024×640. On the synthetic page at 1024 px: token fill 5/5 (3 after one
+automatic repair — the validator rejects invented identifiers such as
+`123456789012`), "pay the bill" → Confirm and Pay 2/2 and flagged for
+confirmation. 1536 px frames scored worse, so egress now defaults to 1024 px.
+
 Remaining misses are OCR errors the rules cannot see through (`B`→`8` in a
 PAN, a UPI handle split into two words) and names NER scores below its floor.
 
@@ -195,8 +210,9 @@ the tab, so read the per-stage `timings` (OCR is the dominant cost).
 
 ### Known gaps
 
-1. **The agent loop has not run against a real VLM.** It runs end to end
-   against `mock_vlm.py`; a Qwen2.5-VL run is untested here (no GPU).
+1. **The real-model runs are synthetic.** Qwen2.5-VL 7B runs on the laptop GPU
+   (below), measured on a synthetic bank page through the full server; a full
+   multi-step task on a live site has not been scored.
 2. **English OCR only** (`eng.traineddata`). Devanagari/Tamil/Bengali PII is
    invisible to the text channel.
 3. **Model choices differ from the idea deck.** OCR is Tesseract (not

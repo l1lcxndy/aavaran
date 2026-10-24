@@ -110,6 +110,29 @@ def test_response_format_falls_back_and_remembers(client):
     assert client.rec.bodies[-1]["response_format"]["type"] == "json_object"
 
 
+def test_invented_identifier_is_rejected_with_token_hint():
+    import actions as A
+    ctx = A.ValidationContext(url="https://bank.example/kyc", marks=MARKS,
+                              vault={"<PII:AADHAAR#1>": {"kind": "AADHAAR", "origin": "https://bank.example"}})
+    with pytest.raises(A.ActionRejected) as e:
+        A.validate('{"type": "type", "index": 1, "text": "1234 5678 9012"}', ctx)
+    assert e.value.code == "raw_pii_in_text" and "<PII:AADHAAR#1>" in e.value.hint
+    assert A.validate('{"type": "type", "index": 1, "text": "<PII:AADHAAR#1>"}', ctx)
+    assert A.validate('{"type": "type", "index": 1, "text": "Pay 5000 to rent"}', ctx)
+
+
+def test_repeating_an_action_is_broken_even_when_pixels_change():
+    import actions as A
+    a = A.validate('{"type": "click", "index": 7}', A.ValidationContext(url="https://x.example/", marks=MARKS))
+    hist = [{"signature": a.signature, "noop": False}] * 3
+    with pytest.raises(A.ActionRejected) as e:
+        A.validate('{"type": "click", "index": 7}', A.ValidationContext(url="https://x.example/", marks=MARKS, history=hist))
+    assert e.value.code == "repeated_action"
+    scroll = A.validate('{"type": "scroll", "direction": "down"}', A.ValidationContext(url="https://x.example/", marks=MARKS))
+    assert A.validate('{"type": "scroll", "direction": "down"}', A.ValidationContext(
+        url="https://x.example/", marks=MARKS, history=[{"signature": scroll.signature, "noop": False}] * 3))
+
+
 def test_destructive_click_requires_confirmation(client):
     sid, _ = open_session(client, "pay the bill")
     marks = [MARKS[0], {"id": 2, "role": "button", "name": "Confirm and Pay", "bbox": [0, 0, 9, 9]}]

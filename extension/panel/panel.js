@@ -133,6 +133,9 @@ const EVENT_TEXT = {
   'decision': (e) =>
     `${e.action ? e.action.op : '?'}` +
     (e.action && e.action.mark_id != null ? ` [${e.action.mark_id}]` : '') +
+    // Values are tokens or plain words; the server never sees anything else.
+    (e.action && e.action.op === 'scroll' ? ` ${e.action.direction || ''}` : '') +
+    (e.action && e.action.value != null ? ` "${e.action.value}"` : '') +
     (e.verification ? ` · verdict=${e.verification.verdict}` : '') +
     (e.reasoning ? ` · ${e.reasoning}` : ''),
   'action': (e) => `${e.op || ''} ${e.ok === false ? 'FAILED: ' + (e.error || '') : 'ok'}`,

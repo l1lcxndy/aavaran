@@ -53,8 +53,12 @@
     flash(e.target, 'Blocked — demo fixture, nothing submitted', '#7f1d1d');
   });
 
+  // Persistent success state: a flash that reverts gives an agent no evidence
+  // the goal was met, so it keeps clicking.
   document.getElementById('dl').addEventListener('click', (e) => {
     e.preventDefault();
-    flash(e.target, 'Statement ready (simulated)', '#047857');
+    e.target.textContent = 'Statement downloaded ✓ (simulated)';
+    e.target.style.background = '#047857';
+    e.target.disabled = true;
   });
 }());

@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
+from veil_check import verify_veiled
+
 
 class ActionRejected(Exception):
     def __init__(self, code: str, detail: str, hint: str = ""):
@@ -69,6 +71,7 @@ SELECTABLE_ROLES = {"select", "combobox", "listbox"}
 # Kinds include underscores (AADHAAR_SUSPECT, GROUPED_ID); without them such a
 # token would skip the vault/origin check entirely.
 PII_TOKEN_RE = re.compile(r"<PII:[A-Z_]+#\d+>")
+RAW_ID_RE = re.compile(r"(?:\d[\s-]?){8,}\d")   # 9+ digits: Aadhaar, card, account, phone
 
 DESTRUCTIVE_RE = re.compile(
     r"\b(pay|payment|transfer|send\s*money|remit|delete|remove|deactivate|"
@@ -310,6 +313,15 @@ def validate(raw: Any, ctx: ValidationContext) -> ValidatedAction:
                     f"{token} was captured on {captured} and cannot be entered on {current_origin}",
                     "Do not move redacted values between sites.",
                 )
+        # The model never sees a PII value, so an identifier in its text was
+        # invented (observed: a 7B typing "123456789012" for an Aadhaar field).
+        raw = PII_TOKEN_RE.sub("", text)
+        if RAW_ID_RE.search(raw) or verify_veiled([raw]):
+            raise ActionRejected(
+                "raw_pii_in_text",
+                "your text contains an identifier value; you cannot know any PII value",
+                f"Type the token instead, e.g. one of: {', '.join(sorted(ctx.vault)) or '(none on this frame)'}.",
+            )
 
     signature = json.dumps(
         {"t": atype, "i": obj.get("index"), "x": obj.get("text"), "u": obj.get("url")},
@@ -322,6 +334,14 @@ def validate(raw: Any, ctx: ValidationContext) -> ValidatedAction:
             "repeated_noop",
             f"you have already tried this exact action {len(noops)} times and the page did not change",
             "Try a different element, scroll to reveal more of the page, or finish with what you have.",
+        )
+    # Changing pixels do not mean progress (a button that flashes and reverts).
+    # Scrolling a long page legitimately repeats, so it is exempt.
+    if atype != "scroll" and len(recent) >= 3:
+        raise ActionRejected(
+            "repeated_action",
+            f"you have taken this exact action {len(recent)} times in your last 4 steps",
+            "If the page shows the goal is done, use finish. Otherwise try something different.",
         )
 
     haystack = " ".join(

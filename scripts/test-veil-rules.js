@@ -59,6 +59,13 @@ const fc = ctx.AAVARAN_HARDEN.failClosedBoxes(
   { redactionPad: 0 }, ctx.AAVARAN_HARDEN.profileFor('https://example.com/'), 1, 2000, 2000, run('normBox'), new Set());
 assert.deepStrictEqual(local(fc.reasons), ['label_proximity(UPI)']);
 
+// A "face" over a block of readable text is rejected; a photo with one stray
+// low-confidence OCR fragment is kept (the giant-black-card regression).
+const isTextBlock = run('isTextBlock');
+const card = Array.from({ length: 8 }, (_, i) => ({ ...w(`value${i}`, 120, 40 + i * 24), confidence: 92 }));
+assert.strictEqual(isTextBlock([100, 30, 400, 240], card, 1), true);
+assert.strictEqual(isTextBlock([500, 30, 700, 240], [{ ...w('~', 560, 120), confidence: 31 }], 1), false);
+
 // Stable ids survive re-layout of other marks.
 const ids = new ctx.AAVARAN_DELTA.StableMarkIds();
 const a = ids.assign([{ role: 'button', name: 'Pay', bbox: [0, 0, 50, 20] }, { role: 'link', name: 'Help', bbox: [0, 40, 50, 60] }]);

@@ -1,18 +1,3 @@
-/* ==========================================================================
- * AAVARAN — Glass Box panel
- * --------------------------------------------------------------------------
- * This is a pure view. It holds no pixels of its own, performs no redaction,
- * and never renders a vault plaintext — the background worker only ever hands
- * it token strings. Its whole job is to make the privacy claim *visible*: raw
- * frame on the left, the frame that actually left the machine on the right,
- * and a byte counter proving those are not the same image.
- *
- * Message contract (background.js section 14):
- *   AAVARAN_STATE  AAVARAN_PREFLIGHT  AAVARAN_WARMUP  AAVARAN_CAPTURE
- *   AAVARAN_RUN    AAVARAN_STOP       AAVARAN_CONFIG  AAVARAN_VAULT
- *   AAVARAN_EVENTS
- * Inbound broadcast: { type: 'AAVARAN_EVENT', event }
- * ========================================================================== */
 
 'use strict';
 
@@ -45,13 +30,7 @@ const el = {
   dSrv: $('dSrv'),
 };
 
-/* --------------------------------------------------------------------------
- * Transport
- * --------------------------------------------------------------------------
- * sendMessage rejects when the service worker is asleep or mid-restart. That
- * is routine in MV3, not an error worth a red line in the trace, so it is
- * retried once before it is reported.
- * -------------------------------------------------------------------------- */
+// sendMessage rejects while the MV3 worker is asleep; retry once before reporting.
 async function send(type, extra = {}, retry = true) {
   try {
     const res = await chrome.runtime.sendMessage({ type, tabId: TARGET_TAB || undefined, ...extra });
@@ -65,8 +44,6 @@ async function send(type, extra = {}, retry = true) {
     throw e;
   }
 }
-
-/* -------------------------------------------------------------------------- */
 
 function fmtBytes(n) {
   if (!Number.isFinite(n)) return '—';
@@ -112,10 +89,6 @@ function chips(items) {
     el.stats.appendChild(c);
   }
 }
-
-/* --------------------------------------------------------------------------
- * Event stream
- * -------------------------------------------------------------------------- */
 
 const EVENT_TEXT = {
   'run-start': (e) => `goal: ${e.goal || ''}`,
@@ -187,10 +160,6 @@ chrome.runtime.onMessage.addListener((msg) => {
   return false;
 });
 
-/* --------------------------------------------------------------------------
- * State
- * -------------------------------------------------------------------------- */
-
 function setRunning(active) {
   el.btnRun.disabled = active;
   el.btnStop.disabled = !active;
@@ -231,10 +200,6 @@ async function refreshVault() {
     el.tokens.appendChild(s);
   }
 }
-
-/* --------------------------------------------------------------------------
- * Actions
- * -------------------------------------------------------------------------- */
 
 async function doCapture() {
   banner(null);
@@ -319,11 +284,6 @@ async function doPurge() {
   }
 }
 
-/* --------------------------------------------------------------------------
- * Narrator — reads the page aloud with the browser's local speech engine.
- * Text comes from on-device OCR (reading order) plus DOM controls, so it
- * still works where markup is canvas or broken. Second press stops.
- * -------------------------------------------------------------------------- */
 async function doNarrate() {
   if (speechSynthesis.speaking) { speechSynthesis.cancel(); return; }
   el.btnNarrate.disabled = true;
@@ -366,10 +326,6 @@ el.btnVault.addEventListener('click', () => refreshVault().catch((e) => logLine(
 el.btnPurge.addEventListener('click', doPurge);
 el.goal.addEventListener('keydown', (e) => { if (e.key === 'Enter') doRun(); });
 
-/* --------------------------------------------------------------------------
- * Boot. State first (cheap), then an automatic capture so the before/after is
- * populated the moment the panel opens — the demo should not require a click.
- * -------------------------------------------------------------------------- */
 (async () => {
   try {
     const s = await refreshState();

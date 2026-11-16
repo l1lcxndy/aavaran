@@ -1,8 +1,4 @@
 'use strict';
-/* Build the Firefox variant into dist/firefox from the same sources.
- *   node scripts/build-firefox.js
- * Then load dist/firefox/manifest.json via about:debugging → This Firefox.
- * The manifest is derived from extension/manifest.json so the two cannot drift. */
 const fs = require('fs');
 const path = require('path');
 

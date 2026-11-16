@@ -1,28 +1,5 @@
 'use strict';
 import './background.hardening.js';
-/* ==========================================================================
- * AAVARAN — background.js  (MV3 service worker, type: "module")
- * ==========================================================================
- * The orchestrator. It owns four things nothing else may touch:
- *
- *   1. The offscreen document lifecycle (getContexts-guarded, race-free).
- *   2. The PII vault (IndexedDB). Plaintext enters here and leaves only into
- *      the page at execution time — never into a network call.
- *   3. The egress guard. Every outbound payload is scanned against the vault
- *      and against the raw PII patterns before fetch() is allowed to run.
- *   4. The ReAct driver: capture → veil → /act → execute → settle → repeat,
- *      with the server adjudicating whether each action actually changed the
- *      world before the next one is planned.
- *
- * All page interaction goes through chrome.scripting.executeScript into the
- * ISOLATED world. There is no persistent content script: nothing is injected
- * into a page until the user starts a run, which is both a smaller attack
- * surface and a smaller privacy claim to defend.
- * ========================================================================== */
-
-/* ==========================================================================
- * 1. Configuration
- * ========================================================================== */
 
 const DEFAULT_CONFIG = Object.freeze({
   serverUrl: 'http://localhost:8756',
@@ -60,15 +37,10 @@ const EVENT_RING = 200;
 const RESTRICTED = /^(chrome|edge|about|devtools|chrome-extension|chrome-untrusted|view-source):/i;
 const WEBSTORE = /^https:\/\/(chromewebstore\.google\.com|chrome\.google\.com\/webstore)/i;
 
-/* ==========================================================================
- * 2. Logging + the event bus the Glass Box panel renders
- * ========================================================================== */
-
 const log = (...a) => console.log('[AAVARAN]', ...a);
 const warn = (...a) => console.warn('[AAVARAN]', ...a);
 const fail = (...a) => console.error('[AAVARAN]', ...a);
 
-/** @type {object[]} */
 let eventRing = [];
 
 function emit(type, data = {}) {
@@ -82,10 +54,6 @@ function emit(type, data = {}) {
   chrome.runtime.sendMessage({ type: 'AAVARAN_EVENT', event }).catch(() => {});
   return event;
 }
-
-/* ==========================================================================
- * 3. Config store
- * ========================================================================== */
 
 let configCache = null;
 
@@ -114,10 +82,6 @@ async function setConfig(patch) {
   emit('config', { config: next });
   return next;
 }
-
-/* ==========================================================================
- * 4. The vault — IndexedDB, local, never serialised outbound
- * ========================================================================== */
 
 const VAULT_DB = 'aavaran-vault';
 const VAULT_STORE = 'tokens';
@@ -161,11 +125,7 @@ function idbRequest(req) {
   });
 }
 
-/*
- * Plaintext is AES-GCM sealed at rest under a key that exists only in this
- * worker's memory. A copy of the profile directory yields ciphertext; a worker
- * restart makes old rows unreadable, so they are purged at boot.
- */
+// AES-GCM under a memory-only key: a copied profile yields ciphertext, and rows die with the worker.
 let vaultKeyPromise = null;
 
 function vaultCryptoKey() {
@@ -211,7 +171,6 @@ async function vaultPut(entries, sessionId, origin) {
   return entries.length;
 }
 
-/** Rows with `value` decrypted. Only for the egress guard and rehydration. */
 async function vaultPlain() {
   const rows = await vaultAll();
   return Promise.all(rows.map(async (r) => ({ ...r, value: await unseal(r) })));
@@ -227,7 +186,6 @@ async function vaultAll() {
   });
 }
 
-/** vaultKey → token, replayed to offscreen so token numbering stays stable. */
 async function vaultKnownTokens() {
   const rows = await vaultAll();
   const map = {};
@@ -235,7 +193,6 @@ async function vaultKnownTokens() {
   return map;
 }
 
-/** token → plaintext, for rehydration at the moment of execution. */
 async function vaultResolve(token) {
   const db = await openVault();
   const tx = db.transaction(VAULT_STORE, 'readonly');
@@ -257,11 +214,6 @@ async function vaultPurge({ sessionId = null, olderThanMs = null } = {}) {
   return doomed.length;
 }
 
-/**
- * Substitute every <PII:KIND#n> token in a string with its plaintext.
- * This runs in the service worker, microseconds before the value is injected
- * into the page. The server produced the token; it never sees what replaced it.
- */
 async function rehydrate(text) {
   if (typeof text !== 'string' || !text.includes('<PII:')) {
     return { text, rehydrated: [], missing: [] };
@@ -279,10 +231,6 @@ async function rehydrate(text) {
   return { text: out, rehydrated, missing };
 }
 
-/* ==========================================================================
- * 5. Offscreen document lifecycle
- * ========================================================================== */
-
 let offscreenCreating = null;
 
 async function hasOffscreenDocument() {
@@ -299,14 +247,7 @@ async function hasOffscreenDocument() {
   return matched.some((c) => c.url === chrome.runtime.getURL(OFFSCREEN_PATH));
 }
 
-/**
- * Chrome permits exactly one offscreen document per extension, and
- * createDocument() is not idempotent. Two concurrent captures both observing
- * "none exists" is the whole bug: the loser throws
- * "Only a single offscreen document may be created". The in-flight promise
- * serialises creation, and the error is still caught in case the document was
- * created by a path outside this function.
- */
+// One offscreen document per extension and createDocument is not idempotent: share the in-flight promise.
 async function ensureOffscreen() {
   // Firefox: no offscreen documents; the veil engine is loaded into this
   // background page itself (background.firefox.html) and called directly.
@@ -364,10 +305,6 @@ async function warmup() {
   return result;
 }
 
-/* ==========================================================================
- * 6. Capture
- * ========================================================================== */
-
 let lastCaptureAt = 0;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -406,17 +343,6 @@ async function captureTab(tab) {
   }
   throw new Error(`captureVisibleTab failed: ${lastError && lastError.message}`);
 }
-
-/* ==========================================================================
- * 7. Injected page functions
- * --------------------------------------------------------------------------
- * These are serialised by chrome.scripting and evaluated in the page's
- * ISOLATED world. They close over nothing: every dependency is either a page
- * global or an entry in `args`. Element references live on the isolated
- * world's globalThis, so they survive between executeScript calls on the same
- * document and vanish on navigation — which is exactly the lifetime a mark
- * should have.
- * ========================================================================== */
 
 function INJ_collect(cfg) {
   const NS = globalThis.__AAVARAN__ || (globalThis.__AAVARAN__ = { gen: 0, entries: [] });
@@ -557,10 +483,6 @@ function INJ_collect(cfg) {
     return !['checkbox', 'radio', 'submit', 'button', 'reset', 'image', 'file'].includes(t);
   }
 
-  /**
-   * Sensitivity is asserted from the DOM, not inferred from pixels. A password
-   * renders as bullets: OCR has nothing to find, yet el.value is plaintext.
-   */
   function sensitivity(el) {
     const tag = el.tagName;
     if (tag === 'INPUT' && (el.type || '').toLowerCase() === 'password') {
@@ -865,11 +787,7 @@ function INJ_act(job) {
   if (resolved.error) return { ok: false, error: resolved.error };
   const el = resolved.el;
 
-  // Re-measure now. The rect captured at perception time is already stale: the
-  // page may have scrolled, a banner may have collapsed, a font may have
-  // loaded. Acting on the captured rect is how agents click the wrong thing.
-  // A mark inside a same-origin iframe measures in that frame's coordinates,
-  // so hit-testing must use that frame's document and viewport, not the top's.
+  // Re-measure now: the perception-time rect is stale after scrolls, banners and font loads.
   const edoc = el.ownerDocument || document;
   const view = edoc.defaultView || window;
   let rect = el.getBoundingClientRect();
@@ -1054,10 +972,6 @@ function INJ_settle(opts) {
   });
 }
 
-/* ==========================================================================
- * 8. Page operation wrappers
- * ========================================================================== */
-
 async function runInPage(tabId, func, args, { world = 'ISOLATED' } = {}) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
@@ -1103,10 +1017,6 @@ async function waitForTabComplete(tabId, timeoutMs) {
   }
   return chrome.tabs.get(tabId);
 }
-
-/* ==========================================================================
- * 9. The veil pipeline
- * ========================================================================== */
 
 async function captureAndVeil(tab, cfg, { forceFull = false, narrate = false } = {}) {
   assertCapturable(tab);
@@ -1168,15 +1078,6 @@ async function captureAndVeil(tab, cfg, { forceFull = false, narrate = false } =
   return { rawDataUrl, inventory, ...result, ms: elapsed };
 }
 
-/* ==========================================================================
- * 10. The egress guard
- * --------------------------------------------------------------------------
- * The last line of defence, and the one that is actually auditable. Before any
- * fetch leaves this worker, the serialised payload is checked against every
- * plaintext value in the vault and against the raw PII patterns. A hit aborts
- * the request. This makes the privacy claim falsifiable instead of aspirational.
- * ========================================================================== */
-
 const EGRESS_PATTERNS = [
   ['AADHAAR', /\b[2-9]\d{3}[\s\-]?\d{4}[\s\-]?\d{4}\b/],
   ['PAN', /\b[A-Z]{5}\d{4}[A-Z]\b/],
@@ -1186,19 +1087,13 @@ const EGRESS_PATTERNS = [
   ['CARD', /\b(?:\d[ \-]?){12,18}\d\b/],
 ];
 
-// Machine-generated fields. No human text can reach them, so a digit run here
-// is an artifact, not a leak. They are excluded from the *pattern* scan only —
-// the vault-plaintext check below still covers the entire payload, including
-// frame_png_b64, so a raw PII value baked into pixels-as-base64 would still
-// be caught if it ever showed up there (it won't, since PNG bytes are binary,
-// but this keeps the guard from special-casing away real coverage).
+// Machine-generated fields: skipped by the pattern scan only; the vault-plaintext check still covers them.
 const OPAQUE_FIELDS = [
   // delta: mode/rect/changeRatio — a float like 0.0651234567890125 reads as a card.
   'frame_png_b64', 'image', 'pixel_hash', 'pixelHash', 'session', 'delta',
   'mark_signature', 'markSignature',
 ];
 
-/** Best-effort: which top-level field contains this match, for the error. */
 function fieldContaining(obj, needle) {
   for (const [k, v] of Object.entries(obj)) {
     try { if (JSON.stringify(v).includes(needle)) return k; } catch (e) { /* cyclic */ }
@@ -1206,7 +1101,6 @@ function fieldContaining(obj, needle) {
   return '(payload)';
 }
 
-/** Show shape, not value: 5523 4444 5555 6669 -> 55##·####·####·#669 */
 function maskMatch(s) {
   return s.length <= 6 ? '#'.repeat(s.length)
     : s.slice(0, 2) + '#'.repeat(s.length - 5) + s.slice(-3);
@@ -1244,10 +1138,6 @@ async function assertNoEgressLeak(payloadObject) {
   return serialised;
 }
 
-/* ==========================================================================
- * 11. Server client
- * ========================================================================== */
-
 async function serverFetch(path, { method = 'POST', body = null, timeoutMs = 90_000, signal } = {}) {
   const cfg = await getConfig();
   const controller = new AbortController();
@@ -1283,11 +1173,7 @@ async function openServerSession(goal) {
   return { sessionId: res.session_id, key };
 }
 
-/**
- * Accept an action only if it carries this session's HMAC and names this
- * session and step. The action is read from the signed bytes, never from the
- * unsigned copy beside them.
- */
+// Read the action from the signed bytes, never the unsigned copy beside them.
 async function verifiedAction(decision, step) {
   const sig = String(decision.signature || '');
   if (!/^[0-9a-f]{64}$/.test(sig) || typeof decision.envelope !== 'string') {
@@ -1333,11 +1219,6 @@ function toObservation(p) {
   };
 }
 
-/* The server's action vocabulary (server/actions.py: type, index, text, ...)
- * does not match the executor's (op, mark_id, value, ...). Translate here
- * rather than in two places. `index` becomes `mark_id`, `type` (the field
- * name, distinct from the "type" action meaning "type text") becomes `op`.
- */
 function mapServerAction(a) {
   if (!a) return null;
   const kind = a.type || a.action || '';
@@ -1384,7 +1265,6 @@ function mapServerAction(a) {
   }
 }
 
-/** token -> { kind, origin } for one run. Never the value. */
 async function vaultManifest(sessionId) {
   const vault = {};
   for (const r of await vaultAll()) {
@@ -1413,13 +1293,7 @@ async function closeServerSession(sessionId) {
     .catch((e) => warn('session close failed:', e.message));
 }
 
-/* ==========================================================================
- * 12. Keepalive
- * --------------------------------------------------------------------------
- * An MV3 service worker is evicted after ~30s without extension API activity.
- * A pending fetch does not count. This ticks a trivial API call so a long
- * multi-step run is not decapitated mid-loop.
- * ========================================================================== */
+// MV3 evicts a worker after ~30s without extension API activity (a pending fetch does not count).
 
 let keepaliveTimer = null;
 
@@ -1435,10 +1309,6 @@ function stopKeepalive() {
   clearInterval(keepaliveTimer);
   keepaliveTimer = null;
 }
-
-/* ==========================================================================
- * 13. The ReAct driver
- * ========================================================================== */
 
 const currentRun = {
   active: false,
@@ -1482,15 +1352,6 @@ function resetRun() {
   stopKeepalive();
 }
 
-/**
- * Reason → Act → Observe.
- *
- * The client perceives and executes; the server reasons and, crucially,
- * adjudicates. Every request after the first carries the post-action frame
- * hash, so the server's first job on each turn is to decide whether the
- * previous action changed anything at all. A loop that does not check this
- * will cheerfully click a dead button twenty-five times and report success.
- */
 async function runAgent({ goal, tabId }) {
   if (currentRun.active) throw new Error('a run is already in progress');
 
@@ -1531,7 +1392,6 @@ async function runAgent({ goal, tabId }) {
       const liveTab = await chrome.tabs.get(tab.id);
       assertCapturable(liveTab);
 
-      /* ---- perceive ---------------------------------------------------- */
       const frame = await captureAndVeil(liveTab, cfg, { forceFull });
       currentRun.lastFrame = {
         raw: frame.rawDataUrl,
@@ -1554,9 +1414,7 @@ async function runAgent({ goal, tabId }) {
         veil: frame.veil,
       });
 
-      /* ---- reason ------------------------------------------------------ */
-      // ref carries live element handles; it is stripped here so the server is
-      // structurally incapable of receiving anything but an index.
+      // ref holds live element handles; strip it so only an index reaches the server.
       const wireMarks = frame.marks.map(({ ref, ...rest }) => rest);
 
       const payload = {
@@ -1578,10 +1436,7 @@ async function runAgent({ goal, tabId }) {
           scroll_x: frame.inventory.viewport.scrollX,
           scroll_y: frame.inventory.viewport.scrollY,
           page_height: frame.inventory.viewport.pageHeight,
-          // Tokenized by the veil, NOT frame.inventory.viewport.url/.title,
-          // which are still raw. A path like /account/9876543210 or a title
-          // reading "Statement — rahul@x.com" is a leak with no pixels in it,
-          // and it is also exactly what trips the server's veil_check.
+          // Veil-tokenized URL/title: the raw ones can carry PII (/account/9876543210).
           url: frame.page ? frame.page.url : '',
           title: frame.page ? frame.page.title : '',
         },
@@ -1606,10 +1461,7 @@ async function runAgent({ goal, tabId }) {
       const decision = await postAct(payload, abort.signal);
       currentRun.bytesEgressed += frame.bytesEgress;
 
-      // The server returns ok:false with action:null on a decode failure, an
-      // unreachable VLM, or exhausted repair attempts. Reading .action.op
-      // unconditionally is what turned that into a bare TypeError with no
-      // indication of which of the three it was.
+      // ok:false + action:null means a decode failure, an unreachable VLM or exhausted repairs.
       forceFull = !!decision.needsKeyframe;
       if (!decision.ok) {
         // The server lost its base frame (restart, TTL): resend once as a keyframe.
@@ -1676,7 +1528,6 @@ async function runAgent({ goal, tabId }) {
         break;
       }
 
-      /* ---- act --------------------------------------------------------- */
       let job = {
         gen: frame.inventory.gen,
         op: decision.action.op,
@@ -1743,7 +1594,6 @@ async function runAgent({ goal, tabId }) {
       };
       emit('action', { step, ...currentRun.lastAction });
 
-      /* ---- observe ----------------------------------------------------- */
       await waitForSettle(tab.id, cfg);
       await waitForTabComplete(tab.id, cfg.settleTimeoutMs).catch(() => {});
     }
@@ -1774,12 +1624,6 @@ async function runAgent({ goal, tabId }) {
   return outcome;
 }
 
-/* ==========================================================================
- * 14. Message router
- * ========================================================================== */
-
-/** The page a panel request is about: the tab the expanded Glass Box was
- *  opened for, else the active tab of the popup's window. */
 async function targetTab(message) {
   if (message.tabId) return chrome.tabs.get(message.tabId);
   return (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
@@ -1905,10 +1749,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
   return true;
 });
-
-/* ==========================================================================
- * 15. Lifecycle
- * ========================================================================== */
 
 chrome.runtime.onInstalled.addListener(async (details) => {
   log(`installed (${details.reason})`);

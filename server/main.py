@@ -105,10 +105,6 @@ frames = FrameStore(keyframe_every=KEYFRAME_EVERY)
 _http: httpx.AsyncClient | None = None
 
 
-# ==========================================================================
-# Wire types
-# ==========================================================================
-
 class Mark(BaseModel):
     id: int
     role: str = ""
@@ -183,10 +179,6 @@ class ActResponse(BaseModel):
     signature: str | None = None
 
 
-# ==========================================================================
-# Session state
-# ==========================================================================
-
 @dataclass
 class Turn:
     role: str
@@ -252,10 +244,6 @@ def prune_images(s: Session) -> None:
             t.image_b64 = None
             t.had_image = True
 
-
-# ==========================================================================
-# Prompting
-# ==========================================================================
 
 # Byte-stable across the whole run: never interpolate the goal, step count or
 # timestamp into this string, or every request misses the upstream prompt cache
@@ -418,10 +406,6 @@ async def call_vlm(messages: list[dict[str, Any]], schema: dict[str, Any]) -> tu
     }
 
 
-# ==========================================================================
-# Endpoints
-# ==========================================================================
-
 @app.get("/health")
 @app.get("/healthz")
 async def health() -> dict[str, Any]:
@@ -513,9 +497,7 @@ async def act(obs: Observation) -> ActResponse:
         log.error("[%s] raw PII in observation text: %s", obs.session[:8], leaks)
         return ActResponse(ok=False, error=f"veil_check_failed: raw {', '.join(leaks)} in text fields")
 
-    # One step at a time per session. Without this, a double-click on Run
-    # interleaves two steps into the same turn list and the trace becomes
-    # unreadable — which is what the duplicated entries in your panel log are.
+    # One step at a time per session: a double-click on Run would interleave two steps.
     async with _locks[obs.session]:
         s = await session_for(obs)
         if s is None:
@@ -537,7 +519,6 @@ async def _act_step(obs: Observation, s: Session, t0: float) -> ActResponse:
             obs.pixelHash == s.last_pixel_hash and obs.markSignature == s.last_mark_signature
         )
 
-    # ---- 1. reconstruct ------------------------------------------------
     full, ingest_err = frames.ingest(
         session=obs.session,
         mode=obs.delta.mode,
@@ -553,7 +534,6 @@ async def _act_step(obs: Observation, s: Session, t0: float) -> ActResponse:
             latencyMs=int((time.perf_counter() - t0) * 1000),
         )
 
-    # ---- 2. decide what the model sees ---------------------------------
     vf = frames.frame_for_vlm(
         session=obs.session,
         mode=obs.delta.mode,
@@ -568,7 +548,6 @@ async def _act_step(obs: Observation, s: Session, t0: float) -> ActResponse:
     text = observation_text(obs, vf.caption)
     s.turns.append(Turn(role="user", text=text, image_b64=vf.image_b64, step=obs.step, kind=vf.kind))
 
-    # ---- 3. propose, validate, repair ----------------------------------
     ctx = A.ValidationContext(
         url=obs.url,
         marks=[m.model_dump() for m in obs.marks],

@@ -1,36 +1,7 @@
 'use strict';
-/* ==========================================================================
- * AAVARAN — pii.hardening.js
- * ==========================================================================
- * Load in offscreen.html AFTER offscreen.hardening.js, BEFORE offscreen.js.
- *
- * Two things live here:
- *   A. GROUPED_RULES — the recall gap that let a real Aadhaar through.
- *   B. verifyEgress() — the Zero-Leak check. Re-OCRs the exact bytes about to
- *      leave the machine and asserts nothing readable survives.
- * ========================================================================== */
 
 (function (root) {
-  /* ======================================================================
-   * A. The grouped-digit gap
-   * ======================================================================
-   * Observed failure: "Aadhaar: 1234 5678 9012" rendered on screen was
-   * transmitted in full.
-   *
-   *   AADHAAR rule  /\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b/  -> no match,
-   *                 first digit is 1 (UIDAI reserves 0 and 1)
-   *   CARD rule     needs 13-19 digits                      -> no match at 12
-   *   ACCOUNT rule  /\b\d{9,18}\b/                          -> no match, the
-   *                 spaces split it into three 4-digit runs
-   *
-   * Every rule in the set is a *validating* rule. That is correct for
-   * precision and wrong for a redaction path, where recall is the objective:
-   * a false redaction costs one retry, a miss costs an identity. Anything
-   * SHAPED like an identifier is redacted whether or not it checksums.
-   *
-   * Insert these AFTER the validating rules in RULES[] so a genuine Aadhaar
-   * still claims its span first and still gets its proper AADHAAR token.
-   * ====================================================================== */
+  // Shape-only rules, after the checksum rules: on the redaction path a miss costs more than a false hit.
 
   const GROUPED_RULES = [
     {
@@ -62,19 +33,7 @@
     },
   ];
 
-  /**
-   * Splice into the existing RULES array. Placement matters: after the
-   * validating rules (so AADHAAR/CARD/PAN claim their spans first), before
-   * nothing (these are the floor).
-   *
-   * In offscreen.js, immediately after the RULES const:
-   *   RULES.push(...AAVARAN_PII.GROUPED_RULES);
-   *
-   * SHORT_ID is aggressive by design and will redact prices, years in tables,
-   * and order numbers. That is the intended trade on a strict/paranoid
-   * profile. Gate it if you are on `balanced`:
-   *   RULES.push(...AAVARAN_PII.rulesFor(profile.name));
-   */
+  // SHORT_ID also hits prices and years, so the balanced profile drops it.
   function rulesFor(profileName) {
     if (profileName === 'balanced') {
       return GROUPED_RULES.filter((r) => r.kind !== 'SHORT_ID');
@@ -82,37 +41,12 @@
     return GROUPED_RULES;
   }
 
-  /* ======================================================================
-   * B. Zero-Leak egress verification
-   * ======================================================================
-   * Every privacy pipeline claims its output is clean. This one checks.
-   *
-   * The claim being tested is deliberately narrow and therefore defensible:
-   *
-   *   "No PII is recoverable from the bytes that leave this machine, by the
-   *    same OCR engine and the same detector that produced the redactions."
-   *
-   * It is NOT a proof of absolute privacy — a stronger OCR, a human, or a
-   * different detector might still recover something. But it closes the
-   * entire class of bug where the redaction geometry is computed correctly
-   * and then applied to the wrong canvas, at the wrong scale, or after the
-   * encode. Those are the bugs that actually ship.
-   *
-   * This runs on the FINAL PNG, post-downscale, post-Set-of-Mark. Verifying
-   * the artifact rather than the process is the whole point: it does not
-   * matter what the pipeline intended, only what is in the bytes.
-   * ====================================================================== */
+  // Re-OCR the exact outgoing PNG and assert no PII span survives.
 
   // Tokens we deliberately PRINT onto redaction bars, and Set-of-Mark chip
   // numbers, are expected in the egress frame and are not leaks.
   const EXPECTED_ARTIFACT_RE = /^<PII:[A-Z]+#\d+>$|^\d{1,3}$/;
 
-  /**
-   * @param {Blob} egressBlob  the exact PNG that will be transmitted
-   * @param {object} deps      { ocrRecognize, flattenWords, buildTextIndex,
-   *                             detectPiiSpans, kinds }
-   * @returns {Promise<{ok:boolean, scanned:number, leaks:object[], ms:number, skipped?:string}>}
-   */
   async function verifyEgress(egressBlob, deps) {
     const t0 = performance.now();
     try {
@@ -144,28 +78,6 @@
       };
     }
   }
-
-  /**
-   * Wire at the very end of veil(), after the egress PNG exists:
-   *
-   *   let verification = { ok: false, skipped: 'disabled' };
-   *   if (cfg.verifyEgress !== false) {
-   *     verification = await AAVARAN_PII.verifyEgress(egressBlob, {
-   *       ocrRecognize, flattenWords, buildTextIndex, detectPiiSpans,
-   *       kinds: cfg.kinds,
-   *     });
-   *     if (!verification.ok && cfg.blockOnLeak) {
-   *       throw new Error(`egress blocked: ${verification.leaks.length} PII
-   *         span(s) still readable in the outgoing frame`);
-   *     }
-   *   }
-   *   // ...include `verification` in the returned payload
-   *
-   * Cost is one extra OCR pass (~400-900ms at egress resolution, which is far
-   * smaller than the OCR resolution, so it is cheaper than the first pass).
-   * Turn it off for throughput runs, leave it on for the demo — it is the
-   * single most convincing thing on the screen.
-   */
 
   root.AAVARAN_PII = {
     GROUPED_RULES,

@@ -7,20 +7,10 @@
     html, body { margin: 0; padding: 0; overflow: hidden; width: 0; height: 0; }
     canvas { display: none; }
   </style>
-  <!--
-    Both libraries are served from the packaged /libs folder. Nothing is
-    fetched from a CDN: that is the privacy requirement, and it is also the
-    only arrangement MV3's extension_pages CSP will execute.
-  -->
   <script src="libs/tesseract.min.js"></script>
   <script src="libs/face-api.min.js"></script>
 </head>
 <body>
-  <!--
-    Fallback input surface for face-api. Its bundled tfjs predates
-    OffscreenCanvas support in fromPixels(); offscreen.js probes the modern
-    paths first and only blits here if every one of them is rejected.
-  -->
   <canvas id="veilCanvas" width="1" height="1"></canvas>
   <script src="delta.js"></script>
   <script src="offscreen.hardening.js"></script>

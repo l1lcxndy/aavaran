@@ -12,3 +12,4 @@ bench/pages/
 dist/
 extension/libs/
 server/.pytest_cache/
+.claude/

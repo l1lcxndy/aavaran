@@ -1,8 +1,4 @@
 'use strict';
-/* Draws each bench page's fields onto a canvas at known positions (ground-truth
- * boxes), runs veil() on it, and records the redaction boxes and latency.
- * Results land in window.AAVARAN_BENCH = { labels, predictions } — the shapes
- * bench/score.py reads — with download links on the page. */
 (async () => {
   const W = 1280;
   const H = 720;

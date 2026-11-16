@@ -1,16 +1,6 @@
 'use strict';
-/* ==========================================================================
- * AAVARAN — background.hardening.js
- * ==========================================================================
- * Client-side action validation, imported by background.js (module worker).
- * The server validates too; this side holds the user's cookies, so it never
- * executes on the server's say-so alone. Exposes self.AAVARAN_BG.
- * ========================================================================== */
 
 (function (root) {
-  /* ======================================================================
-   * 4. Client-side action validation (req. 4, client half)
-   * ====================================================================== */
 
   // Never execute purely on the server's say-so. The server is the thing
   // talking to an untrusted model; the extension is the thing with the
@@ -46,12 +36,6 @@
     constructor(code, detail) { super(`${code}: ${detail}`); this.code = code; this.detail = detail; }
   }
 
-  /**
-   * @param {object} action     what the server returned
-   * @param {object[]} marks    the manifest for the frame this action was
-   *                            computed against (NOT the current frame)
-   * @param {object} ctx        { url, vaultOrigins, history }
-   */
   function validateAction(action, marks, ctx) {
     if (!action || typeof action !== 'object') throw new ActionRejected('malformed', 'not an object');
     const type = String(action.type || action.action || '');
@@ -61,10 +45,7 @@
         `"${type}" is not executable. Allowed: ${Object.keys(ALLOWED_ACTIONS).join(', ')}`);
     }
 
-    // Reject unexpected fields rather than ignoring them — a model that
-    // invents `selector` or `xpath` has left the grounding contract, and
-    // silently dropping the field would execute a different action than the
-    // one it reasoned about.
+    // Reject unknown fields: a model inventing `selector` has left the index-grounding contract.
     const allowedKeys = new Set([...Object.keys(spec), 'type', 'action', 'reason', 'confidence']);
     for (const k of Object.keys(action)) {
       if (!allowedKeys.has(k)) throw new ActionRejected('unknown_field', `"${k}" is not a field of ${type}`);
@@ -134,13 +115,7 @@
       }
     }
 
-    /* --- the interesting one -------------------------------------------- *
-     * Detokenisation is the one moment plaintext PII re-enters the page. Bind
-     * each token to the origin it was captured on. A model that learned
-     * <PII:CARD#1> on the bank's page and then proposes typing it into a form
-     * on another origin is describing an exfiltration, whether or not it
-     * "meant" to. This is a hard stop, not a confirmation prompt.
-     * -------------------------------------------------------------------- */
+    // Tokens are bound to their capture origin; typing one on another origin is a hard stop.
     if (type === 'type' && typeof action.text === 'string') {
       const tokens = action.text.match(PII_TOKEN_RE) || [];
       let origin = '';

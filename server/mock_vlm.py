@@ -50,8 +50,7 @@ log = logging.getLogger("mock")
 
 app = FastAPI(title="AAVARAN mock VLM")
 
-# Latency band of a 7B VLM on a mid-range GPU. Included so your demo timings
-# are honest rather than suspiciously instant.
+# Latency band of a 7B VLM on a mid-range GPU, so mock timings are realistic.
 SIMULATED_LATENCY_S = 0.9
 
 
@@ -127,13 +126,7 @@ def decide(goal: str, marks: list[dict], step: int, last_failed: bool) -> dict[s
             return {"type": "type", "index": t["id"], "text": "quarterly report", "submit": True,
                     "reason": "Entering the search term.", "confidence": 0.85}
 
-    # Transfer path — this one is SUPPOSED to get stopped. "Confirm and Pay"
-    # matches DESTRUCTIVE_RE, so the validator returns requiresConfirmation
-    # and the run halts for a human. That is the demo moment.
-    #
-    # Needles are ordered longest-first and restricted to non-editable marks:
-    # a bare "pay" needle matches "Payee account number", which would click an
-    # input instead of the button and silently skip the whole demonstration.
+    # Transfer must halt at 'Confirm and Pay' (destructive). Longest needle first, non-editable only: 'pay' matches 'Payee account number'.
     if "transfer" in g or "pay" in g or "send" in g:
         t = find(marks, "confirm and pay", "confirm", "transfer", editable=False)
         if t:

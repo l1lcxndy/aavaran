@@ -3,14 +3,6 @@
    strict CSP and so nothing here can be mistaken for part of the extension. */
 
 (function () {
-  /* ---- face photo ------------------------------------------------------
-   * Deliberately a local file picker rather than a bundled image: use a photo
-   * of yourself or a teammate who has agreed to it. Two reasons — it dodges
-   * every licensing question a judge might raise about a stock face, and
-   * "that is my actual face, and it is gone" lands harder than a stock photo
-   * ever will. The image never leaves this page; it is read with FileReader
-   * straight into a data URL.
-   * --------------------------------------------------------------------- */
   const drop = document.getElementById('drop');
   const file = document.getElementById('file');
   const avatar = document.getElementById('avatar');
@@ -35,12 +27,6 @@
     if (saved) { avatar.src = saved; avatar.hidden = false; drop.hidden = true; }
   } catch { /* private mode */ }
 
-  /* ---- actions ---------------------------------------------------------
-   * Both buttons are inert. "Confirm and Pay" exists purely so the action
-   * validator has a genuinely destructive control to refuse: its accessible
-   * name matches DESTRUCTIVE_RE, so any agent proposal to click it returns
-   * requiresConfirmation and stops for a human. Nothing is ever submitted.
-   * --------------------------------------------------------------------- */
   const flash = (el, text, colour) => {
     const prev = el.textContent;
     el.textContent = text;

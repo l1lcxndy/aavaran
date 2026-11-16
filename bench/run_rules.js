@@ -1,11 +1,4 @@
 'use strict';
-/* Text-channel benchmark: runs the extension's own PII rules (offscreen.js +
- * pii.hardening.js) over each bench page's visible text and writes
- * predictions.json for score.py. Measures the rule layer only — OCR geometry,
- * faces and IoU need the extension's Capture & Veil on the rendered page.
- *
- *   node bench/run_rules.js [bench/pages]
- */
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');

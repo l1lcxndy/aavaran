@@ -1,25 +1,4 @@
 'use strict';
-/* ==========================================================================
- * AAVARAN — delta.js
- * ==========================================================================
- * Frame delta encoding. Load in offscreen.html BEFORE offscreen.js:
- *   <script src="delta.js"></script>
- *
- * The contract, and why it is shaped this way:
- *
- * A ReAct loop resends a near-identical 1536px screenshot every step. At
- * Qwen2.5-VL's ~1 token per 28x28 patch after 2x2 merge that is ~1.1k image
- * tokens per step, of which typically 2-6% is new information. Sending the
- * delta is not just a bandwidth win over the wire — combined with the server's
- * keyframe policy it is the difference between O(steps) and O(1) image tokens
- * for a stationary page.
- *
- * Hashing happens on the VEILED, PRE-MARK canvas, for two reasons:
- *   1. Redaction bars are deterministic given the same PII, so a redacted
- *      region does not register as motion.
- *   2. Renumbering a Set-of-Mark chip must never look like a state change,
- *      or the agent's "did my click do anything?" signal becomes noise.
- * ========================================================================== */
 
 (function (root) {
   const TILE = 64;                 // egress px per tile edge
@@ -27,12 +6,6 @@
   const FNV_OFFSET = 0x811c9dc5;
   const FNV_PRIME = 0x01000193;
 
-  /**
-   * Per-tile FNV-1a over a 2x-subsampled luma-ish combination.
-   * ~1.2ms for a 1536x864 frame, which is inside the noise floor next to a
-   * 40ms PNG encode.
-   * @returns {{cols:number,rows:number,tile:number,width:number,height:number,hashes:Uint32Array}}
-   */
   function tileGrid(canvas, tile = TILE) {
     const W = canvas.width;
     const H = canvas.height;
@@ -64,11 +37,6 @@
     return { cols, rows, tile, width: W, height: H, hashes };
   }
 
-  /**
-   * Compare two grids. Returns dirty tile rects merged into a small number of
-   * axis-aligned rectangles plus the union box.
-   * A dimension change (resize, zoom, devtools open) forces a full frame.
-   */
   function diffGrid(prev, next) {
     if (!prev
       || prev.cols !== next.cols || prev.rows !== next.rows
@@ -175,15 +143,6 @@
     stillRatio: 0.0,
   });
 
-  /**
-   * Decide what this step should put on the wire.
-   *
-   * 'unchanged' — zero image bytes. The server reuses its cached frame and the
-   *               VLM turn carries no new image at all. This is the mode that
-   *               actually removes tokens rather than just bytes.
-   * 'patch'     — one cropped PNG of the union box + its origin.
-   * 'full'      — keyframe.
-   */
   function choose(diff, grid, opts) {
     const cfg = { ...POLICY_DEFAULTS, ...(opts || {}) };
     if (cfg.forceFull || diff.full) {
@@ -203,12 +162,7 @@
     return { mode: 'patch', reason: 'localised', rect: [x0, y0, x1 - x0, y1 - y0], areaFrac };
   }
 
-  /**
-   * Content-addressed Set-of-Mark ids. Reading-order numbering renumbers
-   * everything below an inserted node, so "[14]" in a patch would name a
-   * different element than "[14]" in the keyframe. Keying on role, name and
-   * quantised geometry keeps an element's id across re-layout.
-   */
+  // Content-addressed mark ids so [14] names the same element across re-layouts.
   class StableMarkIds {
     constructor() { this.byKey = new Map(); this.next = 1; }
 
@@ -223,7 +177,6 @@
       ].join('|');
     }
 
-    /** Mutates each mark's id in place. */
     assign(marks) {
       const seen = new Set();
       for (const m of marks) {

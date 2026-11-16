@@ -73,7 +73,6 @@ class FrameStore:
         self.patch_budget = patch_budget
         self._s: dict[str, SessionFrames] = {}
 
-    # ---------------------------------------------------------------- utils
     def _gc(self) -> None:
         now = time.time()
         dead = [k for k, v in self._s.items() if now - v.updated > self.ttl]
@@ -94,7 +93,6 @@ class FrameStore:
         s.updated = time.time()
         return s
 
-    # ------------------------------------------------------------- ingest
     def ingest(
         self,
         session: str,
@@ -154,7 +152,6 @@ class FrameStore:
         s.patches_since_keyframe += 1
         return s.full, None
 
-    # ------------------------------------------------------- vlm framing
     def needs_keyframe(self, session: str, step: int, url_changed: bool) -> bool:
         s = self._get(session)
         if s.full is None:

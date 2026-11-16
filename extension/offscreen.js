@@ -1,47 +1,7 @@
 'use strict';
-/* ==========================================================================
- * AAVARAN — offscreen.js
- * ==========================================================================
- * The Veil + Set-of-Mark rendering engine.
- *
- * This is the ONLY place in the system where raw pixels and raw PII strings
- * coexist. Nothing in this file ever touches the network. The single value it
- * emits is an image in which the sensitive pixels have been *overwritten* —
- * not blurred, not masked with a CSS overlay — plus a token manifest whose
- * plaintext side never leaves the extension process.
- *
- * Pipeline (single pass, one OffscreenCanvas chain):
- *
- *   dataURL ──► ImageBitmap ──► full-res OffscreenCanvas (device px)
- *      │
- *      ├─ face-api.js  (tiny_face_detector, local weights)  ─┐
- *      ├─ Tesseract.js (eng, local wasm + traineddata)       ├─► redaction set
- *      ├─ DOM channel  (password fields, PII in input values)┘
- *      │
- *      ├─ DESTRUCTIVE FILL  ── pixels are gone at this point
- *      ├─ perceptual hash   ── computed on veiled, pre-mark pixels
- *      ├─ downscale to egress resolution
- *      ├─ Set-of-Mark overlay ── [1] [2] [3] … drawn at egress scale
- *      └─ PNG encode ──► exactly the bytes that will leave this machine
- *
- * Globals supplied by offscreen.html (all from ./libs, zero network):
- *   Tesseract  — libs/tesseract.min.js      (v5)
- *   faceapi    — libs/face-api.min.js       (v0.22)
- *
- * Contract with background.js:
- *   in : { target:'offscreen', type:'AAVARAN_VEIL',  id, payload }
- *   out: { ok, veiledDataUrl, marks, veil, newVaultEntries, pixelHash, ... }
- * ========================================================================== */
-
-/* ==========================================================================
- * 0. Configuration
- * ========================================================================== */
 
 const DEFAULTS = Object.freeze({
-  // Long edge of the frame that is actually transmitted. Qwen2.5-VL bills by
-  // area (~1 token per 28x28 patch after 2x2 merge). Measured on a local
-  // Qwen2.5-VL 7B: 1024 px was more accurate than 1536 (9/9 vs 3/6 on token
-  // fills and confirmations) at ~60% of the image tokens.
+  // Transmitted long edge. On local Qwen2.5-VL 7B, 1024 beat 1536 (9/9 vs 3/6) at ~60% of the image tokens.
   egressMaxEdge: 1024,
   // Long edge used for OCR. OCR accuracy is resolution-bound, so this stays
   // near native. Above ~3000px Tesseract cost grows faster than its recall.
@@ -93,11 +53,6 @@ const log = (...a) => console.log('[AAVARAN/veil]', ...a);
 const warn = (...a) => console.warn('[AAVARAN/veil]', ...a);
 const err = (...a) => console.error('[AAVARAN/veil]', ...a);
 
-/* ==========================================================================
- * 1. PII engine — Verhoeff, Luhn, and span-accurate pattern detection
- * ========================================================================== */
-
-/** Verhoeff dihedral group D5 multiplication table. */
 const VERHOEFF_D = Object.freeze([
   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
   [1, 2, 3, 4, 0, 6, 7, 8, 9, 5],
@@ -111,7 +66,6 @@ const VERHOEFF_D = Object.freeze([
   [9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
 ]);
 
-/** Verhoeff permutation table. */
 const VERHOEFF_P = Object.freeze([
   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
   [1, 5, 7, 6, 2, 8, 3, 0, 9, 4],
@@ -123,17 +77,7 @@ const VERHOEFF_P = Object.freeze([
   [7, 0, 4, 6, 9, 1, 3, 2, 5, 8],
 ]);
 
-/**
- * Verhoeff checksum validation, as mandated by UIDAI for Aadhaar.
- *
- * NOTE: the prototype's (since removed) utils.js table was wrong — both `d` and `p`
- * were the same symmetric matrix, which makes the checksum degenerate and
- * accept ~10% of random 12-digit strings while rejecting valid Aadhaars.
- * These are the real D5 multiplication and permutation tables.
- *
- * @param {string} value 12 digits, separators tolerated
- * @returns {boolean}
- */
+// Verhoeff checksum (UIDAI's Aadhaar check digit), real D5 tables.
 function verhoeffValid(value) {
   const digits = String(value).replace(/\D/g, '');
   if (digits.length !== 12) return false;
@@ -146,7 +90,6 @@ function verhoeffValid(value) {
   return c === 0;
 }
 
-/** Luhn mod-10 checksum — payment cards. */
 function luhnValid(value) {
   const digits = String(value).replace(/\D/g, '');
   if (digits.length < 13 || digits.length > 19) return false;
@@ -161,11 +104,7 @@ function luhnValid(value) {
   return sum % 10 === 0;
 }
 
-/**
- * Detection rules, evaluated in priority order. Earlier rules claim their
- * character span so a card number is never re-matched as a bare account
- * number, and an Aadhaar is never shredded into three "phone-ish" fragments.
- */
+// Priority order: earlier rules claim their span first.
 const RULES = [
   {
     kind: 'AADHAAR',
@@ -232,8 +171,6 @@ const RULES = [
   },
   {
     kind: 'NAME',
-    // shortcut: label-anchored only ("Name: R. Sharma"), no NER; a bare name in
-    // prose is missed. Upgrade to the ONNX NER model when it ships.
     re: /(?<=\b(?:[Nn]ame|[Hh]older|[Nn]ominee)[ \t]*[:|\-]?[ \t]*)[A-Z](?:[a-z]+|\.)(?:[ \t]+[A-Zl](?:[a-z]+|\.)){0,3}/g,
   },
   {
@@ -248,24 +185,11 @@ const RULES = [
 // pii.hardening.js. Appended so checksum rules still claim their spans first.
 RULES.push(...self.AAVARAN_PII.GROUPED_RULES);
 
-/**
- * Scan text and return non-overlapping PII spans, highest-priority rule wins.
- * @param {string} text
- * @param {Record<string, boolean>} kinds enabled kinds
- * @returns {{kind:string, start:number, end:number, raw:string, value:string}[]}
- */
 function detectPiiSpans(text, kinds, extraRules = []) {
   if (!text) return [];
-  /** @type {{kind:string,start:number,end:number,raw:string,value:string,prio:number}[]} */
   const cands = [];
 
-  // Gather every rule's matches first. Resolving overlaps by rule order alone
-  // is wrong: "5523 4444 5555 6669" has "5523 4444 5555" as its first twelve
-  // digits, which happens to be Verhoeff-valid, so AADHAAR (rule order 1)
-  // used to claim it before CARD (rule order 2) ever got a chance, leaving
-  // "6669" unredacted. Collecting candidates and picking the longest span
-  // fixes that whole class: a card is always longer than any Aadhaar-shaped
-  // prefix hiding inside it.
+  // Collect all matches, then keep the longest span: rule order alone let AADHAAR claim a card's first 12 digits.
   [...RULES, ...extraRules].forEach((rule, prio) => {
     if (kinds && kinds[rule.kind] === false) return;
     rule.re.lastIndex = 0;
@@ -304,21 +228,13 @@ function detectPiiSpans(text, kinds, extraRules = []) {
   return out;
 }
 
-/** SHA-256 hex of `kind|value` — the vault key. Never leaves the machine. */
 async function vaultKey(kind, value) {
   const bytes = new TextEncoder().encode(`${kind}|${value}`);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/**
- * Session-scoped, deterministic token allocator.
- *
- * Token identity is derived from the *value*, so the same email is
- * <PII:EMAIL#1> on step 1 and on step 17, even though this offscreen document
- * may have been torn down and rebuilt in between — background.js replays the
- * known key→token map on every request, keeping this module stateless.
- */
+// Token identity derives from the value, so a repeated value gets the same token.
 class TokenVault {
   constructor(known) {
     this.map = new Map(Object.entries(known || {}));  // vaultKey -> token
@@ -344,7 +260,6 @@ class TokenVault {
     return token;
   }
 
-  /** Replace every PII span in `text` with its token. Order-safe. */
   async tokenize(text, kinds, extraRules) {
     if (!text) return { text: text || '', tokens: [] };
     const spans = detectPiiSpans(text, kinds, extraRules);
@@ -363,10 +278,6 @@ class TokenVault {
   }
 }
 
-/* ==========================================================================
- * 2. Tesseract worker — warm singleton, serialised, local-only
- * ========================================================================== */
-
 const OCR = {
   worker: null,
   initPromise: null,
@@ -378,12 +289,7 @@ const OCR = {
   IDLE_MS: 5 * 60 * 1000,
 };
 
-/**
- * Preflight: the single most common reason this pipeline silently produces
- * zero redactions is that one of the bundled wasm assets is a 0-byte file
- * (a failed/aborted download). Tesseract reports that as an opaque worker
- * error long after the fact, so we check it up front and fail loudly.
- */
+// A 0-byte wasm asset (aborted download) makes Tesseract fail opaquely; check sizes up front.
 let assetsOk = false;
 
 async function assertLocalAssets() {
@@ -471,7 +377,6 @@ function scheduleOcrIdleRelease() {
   }, OCR.IDLE_MS + 1000);
 }
 
-/** Serialise recognition — a Tesseract worker handles exactly one job. */
 function ocrRecognize(blob) {
   const job = OCR.queue.then(async () => {
     const worker = await initOcr();
@@ -485,18 +390,9 @@ function ocrRecognize(blob) {
   return job;
 }
 
-/**
- * tesseract.js moved the word list between the top level and the block tree
- * across v5/v6. Normalise both shapes so this code survives a lib upgrade.
- * @returns {{text:string, bbox:{x0:number,y0:number,x1:number,y1:number}, confidence:number, line:number}[]}
- */
 function flattenWords(data) {
   if (Array.isArray(data.words) && data.words.length) {
-    // v5 hangs a reference to the parent line off each word. Identity-map it to
-    // a dense index; where the reference is absent, bucket by baseline y so
-    // line breaks are still recovered rather than every word becoming its own
-    // line (which would insert a newline between the three groups of an
-    // Aadhaar and stop the span regex from ever matching).
+    // Map each word's parent-line reference to a dense index; fall back to bucketing by baseline y.
     const lineIds = new Map();
     return data.words.map((w) => {
       let line;
@@ -536,16 +432,6 @@ function flattenWords(data) {
   return out;
 }
 
-/**
- * Rebuild a flat text buffer from OCR words while keeping an exact
- * character-offset → word-index map.
- *
- * This is the correction for the prototype's substring heuristic, which
- * compared each PII match against each word with `includes()` in both
- * directions. That over-redacts (the word "12" blacks out because it is
- * contained in a card number elsewhere on the page) and under-redacts
- * (an Aadhaar split across three OCR words matches none of them).
- */
 function buildTextIndex(words) {
   let text = '';
   const map = []; // { start, end, wordIdx }
@@ -567,12 +453,7 @@ function buildTextIndex(words) {
   return { text, map };
 }
 
-/**
- * Tesseract segments a two-column form into separate blocks (every label,
- * then every value), which puts "Name" and "Meera Reddy" on different lines
- * and defeats every label-anchored rule. Rebuild visual rows from geometry:
- * words whose vertical centres overlap share a line, ordered left to right.
- */
+// Tesseract splits two-column forms into label and value blocks; rebuild visual rows from geometry.
 function relineWords(words) {
   const sorted = words.slice().sort((a, b) => (a.bbox.y0 + a.bbox.y1) - (b.bbox.y0 + b.bbox.y1));
   let line = -1;
@@ -589,7 +470,6 @@ function relineWords(words) {
   return sorted.sort((a, b) => a.line - b.line || a.bbox.x0 - b.bbox.x0);
 }
 
-/** Visual lines (already re-lined, left to right) as plain strings. */
 function readingLines(words) {
   const lines = [];
   let last = null;
@@ -600,7 +480,6 @@ function readingLines(words) {
   return lines;
 }
 
-/** Words whose character range intersects [start, end). */
 function wordsInSpan(map, start, end) {
   const hits = [];
   for (const entry of map) {
@@ -610,10 +489,6 @@ function wordsInSpan(map, start, end) {
   }
   return hits;
 }
-
-/* ==========================================================================
- * 3. face-api.js — local weights, backend-agnostic input adapter
- * ========================================================================== */
 
 const FACE = { loaded: false, loading: null, backend: null, inputMode: null, failed: false };
 
@@ -650,12 +525,7 @@ async function initFaces() {
   return FACE.loading;
 }
 
-/**
- * face-api bundles tfjs 1.x, whose `fromPixels` predates OffscreenCanvas.
- * Probe the accepted input shapes once and remember which one works, rather
- * than throwing on every frame. The DOM-canvas path is the guaranteed floor —
- * an offscreen document is a real document, so a real <canvas> is available.
- */
+// face-api's bundled tfjs 1.x predates OffscreenCanvas: probe input shapes once, DOM canvas as the floor.
 async function faceTensorFrom(canvas) {
   const w = canvas.width;
   const h = canvas.height;
@@ -694,14 +564,6 @@ async function faceTensorFrom(canvas) {
   }
   throw lastError || new Error('no viable face-api input adapter');
 }
-
-/* ==========================================================================
- * 3b. On-device NER — Transformers.js + ONNX Runtime Web, local weights only
- * --------------------------------------------------------------------------
- * Finds person names the pattern rules cannot (a name has no checksum).
- * Execution provider is probed once: WebGPU, else WASM-SIMD, else the veil
- * runs on rules alone (label-anchored NAME rule) — it never blocks on NER.
- * ========================================================================== */
 
 const NER = { pipe: null, loading: null, failed: false, reason: '', device: null };
 const NER_MAX_LINES = 240;     // bounds latency on huge pages; rules still cover the rest
@@ -754,11 +616,7 @@ function initNer() {
   return NER.loading;
 }
 
-/**
- * One input per visual line. The model is prose-trained: inside a block of
- * form rows ("PAN | ABCDE1234F") it loses all context and finds nothing,
- * while the same row on its own ("Prepared for: Arjun Reddy") is found.
- */
+// One input per visual line: the prose-trained model finds nothing inside a block of form rows.
 function nerLines(texts) {
   const lines = new Set();
   for (const raw of texts.join('\n').split('\n')) {
@@ -768,10 +626,6 @@ function nerLines(texts) {
   return [...lines].slice(0, NER_MAX_LINES);
 }
 
-/**
- * Group B-/I-PERSON wordpieces into names and return them as a regex that
- * tolerates the whitespace the tokenizer threw away ("R . Sharma").
- */
 function personPatterns(tokens) {
   const names = [];
   let cur = null;
@@ -801,7 +655,6 @@ function personPatterns(tokens) {
   return [...out];
 }
 
-/** Extra detection rules for this frame (empty when NER is unavailable). */
 async function nerRules(texts, timings, warnings) {
   const t0 = performance.now();
   try {
@@ -833,10 +686,6 @@ async function nerRules(texts, timings, warnings) {
     timings.ner = Math.round(performance.now() - t0);
   }
 }
-
-/* ==========================================================================
- * 4. Canvas + geometry helpers
- * ========================================================================== */
 
 async function bitmapFromDataUrl(dataUrl) {
   const blob = await (await fetch(dataUrl)).blob();
@@ -872,7 +721,6 @@ function blobToDataUrl(blob) {
   });
 }
 
-/** Clamp + integerise a box so a dilated redaction never leaves a sliver. */
 function normBox(x0, y0, x1, y1, pad, w, h) {
   const nx0 = Math.max(0, Math.floor(Math.min(x0, x1) - pad));
   const ny0 = Math.max(0, Math.floor(Math.min(y0, y1) - pad));
@@ -883,12 +731,7 @@ function normBox(x0, y0, x1, y1, pad, w, h) {
 
 function boxArea(b) { return Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]); }
 
-/**
- * True when a detected "face" box is mostly confidently-read text: >= 6 words
- * at OCR confidence >= 70 covering >= 10% of its area. A real face yields at
- * most a few low-confidence fragments.
- * @param {number[]} box device px; words carry OCR-scale bboxes (divide by scale)
- */
+// A 'face' box mostly covered by confident OCR text is a text block, not a face.
 function isTextBlock(box, words, scale) {
   let n = 0;
   let covered = 0;
@@ -911,7 +754,6 @@ function boxIntersect(a, b) {
   return x1 <= x0 || y1 <= y0 ? null : [x0, y0, x1, y1];
 }
 
-/** Merge boxes that touch or overlap, so adjacent words become one clean bar. */
 function mergeBoxes(boxes, gap = 6) {
   const out = [];
   const used = new Array(boxes.length).fill(false);
@@ -941,16 +783,7 @@ function mergeBoxes(boxes, gap = 6) {
   return out;
 }
 
-/* ==========================================================================
- * 5. Perceptual hash — the client half of the ReAct observation channel
- * ========================================================================== */
-
-/**
- * 64-bit dHash of the *veiled, pre-mark* frame. The server compares successive
- * hashes to decide whether an action actually moved the world. It is computed
- * before marks are drawn so that renumbering a label does not masquerade as a
- * state change.
- */
+// dHash of the veiled pre-mark frame, so mark renumbering is not seen as a page change.
 function perceptualHash(canvas) {
   const { canvas: small, ctx } = makeCanvas(9, 8);
   ctx.imageSmoothingEnabled = true;
@@ -973,7 +806,6 @@ function perceptualHash(canvas) {
   return hex;
 }
 
-/** Structural signature — what the DOM looks like, independent of pixels. */
 async function markSignature(marks) {
   const payload = marks
     .map((m) => `${m.role}|${m.name}|${m.editable ? 1 : 0}|${m.bbox.map((v) => Math.round(v / 8)).join(',')}`)
@@ -984,11 +816,7 @@ async function markSignature(marks) {
     .map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/**
- * Exact-match key for detection reuse: every capture byte plus every input
- * that shapes redaction. Deliberately no downscaled or perceptual component:
- * a coarse key would reuse stale boxes after new PII is painted.
- */
+// Exact-match key, no perceptual part: a coarse key would reuse stale boxes after new PII appears.
 async function veilReuseKey(payload) {
   const meta = JSON.stringify([
     payload.domMarks || [], payload.opaque || [], payload.viewport || {}, payload.config || {},
@@ -1000,20 +828,7 @@ async function veilReuseKey(payload) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/* ==========================================================================
- * 6. Set-of-Mark renderer
- * ========================================================================== */
-
-/**
- * Draw numbered boxes. The VLM answers with an index, never a coordinate —
- * which removes the entire class of "the model guessed a pixel 40px off"
- * failures and makes the grounding contract verifiable: an index either
- * exists in the manifest or the action is rejected before it is executed.
- *
- * Label chips are placed by collision search so no chip hides another mark's
- * chip; an occluded label is an unreadable index, and an unreadable index is
- * an action the model cannot express.
- */
+// The VLM answers with a mark index, never a coordinate.
 function drawMarks(ctx, marks, opts) {
   const fontSize = opts.fontSize;
   const chipH = Math.round(fontSize * 1.55);
@@ -1069,19 +884,6 @@ function drawMarks(ctx, marks, opts) {
   ctx.restore();
 }
 
-/* ==========================================================================
- * 7. The veil — main entry point
- * ========================================================================== */
-
-/**
- * @param {object} payload
- * @param {string} payload.rawDataUrl        PNG data URL from captureVisibleTab
- * @param {object[]} payload.domMarks        interactive elements, CSS viewport px
- * @param {object[]} payload.opaque          canvas/video/cross-origin iframe regions
- * @param {object} payload.viewport          visual-viewport metrics from the page
- * @param {object} payload.knownTokens       vaultKey -> token, replayed by background
- * @param {object} payload.config            overrides for DEFAULTS
- */
 async function veil(payload) {
   const cfg = { ...DEFAULTS, ...(payload.config || {}) };
   cfg.kinds = { ...DEFAULTS.kinds, ...((payload.config && payload.config.kinds) || {}) };
@@ -1104,7 +906,6 @@ async function veil(payload) {
   const warnings = [];
   const t0 = performance.now();
 
-  /* ---- 6.1 decode -------------------------------------------------------- */
   const { bitmap, bytes: bytesRaw } = await bitmapFromDataUrl(payload.rawDataUrl);
   const devW = bitmap.width;
   const devH = bitmap.height;
@@ -1114,16 +915,7 @@ async function veil(payload) {
   bitmap.close();
   timings.decode = Math.round(performance.now() - t0);
 
-  /* ---- 6.2 coordinate system -------------------------------------------- *
-   * DPR is derived empirically from the captured bitmap rather than trusted
-   * from window.devicePixelRatio. captureVisibleTab rasterises the *visual*
-   * viewport, so this single ratio absorbs device pixel ratio, browser zoom
-   * and pinch-zoom simultaneously — the three things that individually put a
-   * synthetic click 10–40px off target on a non-default display.
-   *
-   *   device_px = (css_px - visualViewport.offset) * dpr
-   *   css_px    = device_px / dpr + visualViewport.offset
-   * ----------------------------------------------------------------------- */
+  // DPR measured from the bitmap, not window.devicePixelRatio, so it also absorbs browser and pinch zoom.
   const vp = payload.viewport || {};
   const vvW = Number(vp.vvWidth) || Number(vp.cssWidth) || devW;
   const vvH = Number(vp.vvHeight) || Number(vp.cssHeight) || devH;
@@ -1155,16 +947,10 @@ async function veil(payload) {
   const reused = reuseKey && RUN.reuse && RUN.reuse.key === reuseKey ? RUN.reuse : null;
   const stageWarnings = warnings.length;
 
-  /* ---- 6.3 face detection ------------------------------------------------ *
-   * Started here, awaited after OCR: tfjs runs on this thread while Tesseract
-   * runs in its worker, so the two overlap. NER needs OCR text and stays after.
-   * ----------------------------------------------------------------------- */
-  /** @type {number[][]} device-px boxes */
+  // Started here, awaited after OCR: tfjs on this thread overlaps the Tesseract worker.
   const redactions = [];
-  /** @type {{box:number[], token:string, kind:string}[]} */
   const redactionLabels = [];
   let facesRedacted = 0;
-  /** @type {number[][]} face boxes, filtered against OCR text before redaction */
   const faceBoxes = [];
   let faceOk = false;
 
@@ -1201,7 +987,6 @@ async function veil(payload) {
     timings.faces = Math.round(performance.now() - tf0);
   })();
 
-  /* ---- 6.4 OCR → PII spans → device-px boxes ----------------------------- */
   const vault = new TokenVault(payload.knownTokens);
   const piiFound = [];
   let ocrOk = false;
@@ -1331,12 +1116,7 @@ async function veil(payload) {
     failClosedRegions += boxes.length;
   }
 
-  /* ---- 6.5 DOM channel — what pixels cannot tell us ---------------------- *
-   * A password field renders as bullets, so OCR sees nothing worth redacting,
-   * yet the DOM holds the plaintext. An autofilled input may be scrolled so
-   * only half its value is painted. The DOM channel covers both, and it is
-   * pixel-exact because the rect comes from layout rather than from a model.
-   * ----------------------------------------------------------------------- */
+  // DOM channel: passwords render as bullets, so OCR cannot see what the DOM knows is sensitive.
   for (const dm of domMarks) {
     let sensitive = !!dm.sensitive;
     let kind = dm.sensitiveKind || 'PASSWORD';
@@ -1361,7 +1141,6 @@ async function veil(payload) {
     textRegions++;
   }
 
-  /* ---- 6.6 fail-closed decision ----------------------------------------- */
   const unsafe = cfg.enableOcr && !ocrOk;
   if (unsafe && cfg.failMode === 'block') {
     return {
@@ -1376,7 +1155,6 @@ async function veil(payload) {
     };
   }
 
-  /* ---- 6.7 destructive fill --------------------------------------------- */
   const tf = performance.now();
   const merged = mergeBoxes(redactions, Math.max(4, cfg.redactionPad));
   fullCtx.save();
@@ -1389,10 +1167,8 @@ async function veil(payload) {
   // stage — downscale, mark overlay, PNG encode — operates on destroyed data,
   // which is why a server-side crop, upscale or re-encode cannot recover them.
 
-  /* ---- 6.8 perceptual hash on veiled, unmarked pixels -------------------- */
   const pixelHash = perceptualHash(full);
 
-  /* ---- 6.9 egress downscale --------------------------------------------- */
   const { canvas: egress, scale: egressScale } = scaledCopy(full, cfg.egressMaxEdge);
   const egressCanvas = egress === full ? makeCanvas(devW, devH).canvas : egress;
   if (egress === full) {
@@ -1403,13 +1179,6 @@ async function veil(payload) {
   const egH = egressCanvas.height;
   const devToEgress = (b) => [b[0] * egressScale, b[1] * egressScale, b[2] * egressScale, b[3] * egressScale];
 
-  /* ---- 6.10 token labels on the bars ------------------------------------ *
-   * Writing <PII:AADHAAR#1> onto the black bar is what makes the redaction
-   * *addressable*. The model cannot read the number, but it can say
-   *   fill(mark 7, "<PII:AADHAAR#1>")
-   * and the client rehydrates from the local vault at execution time. Privacy
-   * without this is just a broken agent.
-   * ----------------------------------------------------------------------- */
   if (cfg.labelRedactions && redactionLabels.length) {
     egCtx.save();
     egCtx.textBaseline = 'middle';
@@ -1428,7 +1197,6 @@ async function veil(payload) {
     egCtx.restore();
   }
 
-  /* ---- 6.11 Set-of-Mark assembly ---------------------------------------- */
   const marks = [];
   let markId = 0;
 
@@ -1465,17 +1233,10 @@ async function veil(payload) {
     });
   }
 
-  /* ---- 6.12 vision channel — marks for surfaces with no DOM -------------- *
-   * Canvas, WebGL, <video> and cross-origin iframes have no queryable
-   * structure. We cluster OCR words inside those regions into line-level
-   * candidates and mark them. This is the seam where an ONNX icon/widget
-   * detector (OmniParser-class) drops in: produce device-px boxes here and
-   * the rest of the pipeline is unchanged.
-   * ----------------------------------------------------------------------- */
+  // Canvas, video and cross-origin iframes have no DOM: mark OCR line clusters inside them.
   const opaque = Array.isArray(payload.opaque) ? payload.opaque : [];
   if (opaque.length && ocrWords.length && markId < cfg.maxMarks) {
     const opaqueBoxes = opaque.map((o) => normBox(...cssToDev(o.rect), 0, devW, devH));
-    /** @type {Map<number, {box:number[], text:string[]}>} */
     const lines = new Map();
     for (const w of ocrWords) {
       const wb = [w.bbox.x0 / ocrScale, w.bbox.y0 / ocrScale, w.bbox.x1 / ocrScale, w.bbox.y1 / ocrScale];
@@ -1519,13 +1280,7 @@ async function veil(payload) {
   // run. A one-off panel capture keeps plain reading-order numbers.
   if (track) RUN.ids.assign(marks);
 
-  /* ---- 6.13 wireframe fallback ------------------------------------------ *
-   * OCR is down, so we cannot certify any pixel as safe — but the DOM channel
-   * is still trustworthy. Rather than block the run, repaint the egress frame
-   * as a schematic: zero captured pixels, full structural grounding. The agent
-   * keeps working on DOM-driven pages and the egress byte count is provably
-   * free of screen content.
-   * ----------------------------------------------------------------------- */
+  // OCR down: repaint the frame as a DOM wireframe with zero captured pixels.
   let mode = 'full';
   if (unsafe && cfg.failMode === 'wireframe') {
     mode = 'wireframe';
@@ -1556,7 +1311,6 @@ async function veil(payload) {
     egCtx.restore();
   }
 
-  /* ---- 6.14 draw the marks ---------------------------------------------- */
   const tm = performance.now();
   drawMarks(egCtx, marks, {
     width: egW,
@@ -1566,7 +1320,6 @@ async function veil(payload) {
   });
   timings.marks = Math.round(performance.now() - tm);
 
-  /* ---- 6.15 encode ------------------------------------------------------ */
   const te = performance.now();
   const blob = await canvasToBlob(egressCanvas, 'image/png');
   const veiledDataUrl = await blobToDataUrl(blob);
@@ -1602,17 +1355,11 @@ async function veil(payload) {
   timings.encode = Math.round(performance.now() - te);
   timings.total = Math.round(performance.now() - t0);
 
-  /* ---- 6.16 tokenize the remaining text surfaces ------------------------ *
-   * The URL and the page title are egress too. A path segment like
-   * /account/9876543210 or a title reading "Statement — rahul@x.com" is a leak
-   * with no pixels involved, and it is also exactly what would trip the
-   * server's own veil_check and abort an otherwise healthy run.
-   * ----------------------------------------------------------------------- */
+  // The URL and title leave the machine too; tokenize them like the pixels.
   const safeUrl = await vault.tokenize(String(vp.url || ''), cfg.kinds, extraRules);
   const safeTitle = await vault.tokenize(String(vp.title || ''), cfg.kinds, extraRules);
   for (const t of [...safeUrl.tokens, ...safeTitle.tokens]) piiFound.push(t);
 
-  /* ---- 6.17 dedupe the reported PII manifest ---------------------------- */
   const seen = new Set();
   const pii = [];
   for (const p of piiFound) {
@@ -1667,17 +1414,10 @@ async function veil(payload) {
   };
 }
 
-/* ==========================================================================
- * 8. Message router
- * ========================================================================== */
-
-/** Per-run veil state; reset whenever a new sessionId arrives. */
 const RUN = { sessionId: null, ids: null, grid: null, sinceKeyframe: 0, reuse: null };
 
 let busy = false;
 
-/** One handler for both transports: runtime messages (Chrome offscreen
- *  document) and direct calls (Firefox, where this runs in the background page). */
 async function handleOffscreen(message) {
   switch (message.type) {
     case 'AAVARAN_PING':

@@ -1,21 +1,3 @@
-# =============================================================================
-# AAVARAN — fetch-libs.ps1
-# =============================================================================
-# Fixes the 0-byte asset problem for real.
-#
-# Why the previous attempts failed:
-#   * libs/worker.min.js          lives at tesseract.js@5/dist/worker.min.js
-#                                 (never downloaded by the earlier commands)
-#   * libs/tesseract-core.wasm.js lives in a DIFFERENT npm package,
-#                                 tesseract.js-core  (never downloaded either)
-#   * tesseract-core.wasm.js is emscripten GLUE — it fetches a sibling
-#     tesseract-core.wasm at runtime, so that file is required too.
-#   * In PowerShell `curl` is an alias for Invoke-WebRequest, so
-#     `curl -L <url> -o <path>` does not parse. That is what produced the
-#     0-byte files in the first place.
-#
-# Run from anywhere:  powershell -ExecutionPolicy Bypass -File .\fetch-libs.ps1
-# =============================================================================
 
 param(
   [string]$ExtensionRoot = (Join-Path $PSScriptRoot 'extension'),
@@ -54,7 +36,6 @@ $Assets = @(
      u="https://unpkg.com/tesseract.js@$TesseractVersion/dist/worker.min.js";
      p=(Join-Path $Libs 'worker.min.js') }
 
-  # --- the two that were missing entirely -----------------------------------
   @{ n='tesseract-core.wasm.js';     min=100000;
      u="https://unpkg.com/tesseract.js-core@$CoreVersion/tesseract-core.wasm.js";
      p=(Join-Path $Libs 'tesseract-core.wasm.js') }

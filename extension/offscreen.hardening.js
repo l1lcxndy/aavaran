@@ -1,24 +1,8 @@
 'use strict';
-/* ==========================================================================
- * AAVARAN — offscreen.hardening.js
- * ==========================================================================
- * Load in offscreen.html AFTER libs, BEFORE offscreen.js:
- *   <script src="libs/tesseract.min.js"></script>
- *   <script src="libs/face-api.min.js"></script>
- *   <script src="delta.js"></script>
- *   <script src="offscreen.hardening.js"></script>
- *   <script src="offscreen.js"></script>
- *
- * Exposes self.AAVARAN_HARDEN. Nothing here touches the network.
- * ========================================================================== */
 
 (function (root) {
   const log = (...a) => console.log('[AAVARAN/harden]', ...a);
   const warn = (...a) => console.warn('[AAVARAN/harden]', ...a);
-
-  /* ======================================================================
-   * 1. Preflight — replaces assertLocalAssets() in offscreen.js
-   * ====================================================================== */
 
   // tesseract-core.wasm.js is emscripten glue; it fetches tesseract-core.wasm
   // from its own directory at runtime. The old preflight checked the glue and
@@ -64,20 +48,8 @@
     return preflightCache;
   }
 
-  /* ======================================================================
-   * 2. Warmup — kills cold start (requirement 3, offscreen half)
-   * ====================================================================== */
-
   const WARM = { state: 'cold', promise: null, detail: null };
 
-  /**
-   * initOcr and initFaces are independent: Tesseract spins a dedicated Worker
-   * thread, face-api warms a WebGL context on the document thread. Running
-   * them with allSettled overlaps ~1.2s of wasm compile with ~0.6s of shader
-   * compile, and — critically — one failing no longer prevents the other from
-   * being ready. The old sequential path meant a broken Tesseract also cost
-   * you face redaction.
-   */
   function warmup(initOcr, initFaces, opts) {
     if (WARM.promise) return WARM.promise;
     const cfg = opts || {};
@@ -113,14 +85,7 @@
 
   function warmState() { return { state: WARM.state, detail: WARM.detail }; }
 
-  /* ======================================================================
-   * 3. Fail-closed recall (requirement 2)
-   * ====================================================================== */
-
-  // A value the OCR could not parse is still PII if the page told us what it
-  // is. Label proximity is the highest-yield recall rule in Indian banking
-  // and KYC UIs, where the value is often rendered in a webfont Tesseract
-  // struggles with while the label is plain system text.
+  // Label proximity: a value next to 'A/c No' is PII even when OCR mangles it.
   const LABEL_RE = new RegExp([
     'aadha?ar', 'uidai', 'pan\\s*(no|number|card)?', 'gstin?', 'ifsc',
     'a\\/?c\\s*(no|number)?', 'acc(ou)?nt\\s*(no|number)?', 'card\\s*(no|number)?',
@@ -155,18 +120,6 @@
     return { name: 'strict', ...RECALL_PROFILES.strict };
   }
 
-  /**
-   * Extra redaction boxes from words the pattern rules did not claim.
-   * Call AFTER the normal span loop, with the same words/map/scale.
-   *
-   * Three bands, each of which is a real miss in the current pipeline:
-   *   a) low-confidence numeric   — garbled Aadhaar, the case the checksum
-   *                                 cannot rescue and the one that matters
-   *   b) label-proximate line     — "A/c No" recognised, value was not
-   *   c) masked forms             — XXXX XXXX 4291
-   *
-   * @returns {{boxes:number[][], reasons:string[]}}
-   */
   function failClosedBoxes(words, cfg, profile, scale, devW, devH, normBox, claimedWordIdx) {
     const boxes = [];
     const reasons = [];
@@ -225,14 +178,6 @@
     return { boxes, reasons };
   }
 
-  /**
-   * When the face model is unavailable, "0 faces redacted" is a lie — the
-   * correct statement is "unknown". Redact every DOM region that could carry
-   * a face: img, video, canvas, svg avatars, and anything the content script
-   * flagged opaque. Today's logs show face_detection_failed with 0 faces
-   * destroyed and a frame still going out. That is the exact failure this
-   * closes.
-   */
   function opaqueFallbackBoxes(payload, cssToDev, normBox, cfg, devW, devH) {
     const out = [];
     const candidates = [
@@ -251,20 +196,6 @@
     return out;
   }
 
-  /* ======================================================================
-   * 4. Observation cache — the other half of the cold-start fix
-   * ====================================================================== */
-
-  /**
-   * OCR is 80-95% of veil latency (your trace: 2082ms). In a ReAct loop the
-   * page is frequently pixel-identical to the previous step — a failed click,
-   * a hover, a re-capture after a no-op. Re-running Tesseract on identical
-   * pixels is pure waste.
-   *
-   * Keyed on a cheap hash of the RAW frame, so it short-circuits before any
-   * model runs. Bounded, because the entries hold redaction geometry derived
-   * from plaintext and must not outlive the session.
-   */
   class ObservationCache {
     constructor(max = 12) { this.max = max; this.map = new Map(); }
 
@@ -285,7 +216,6 @@
     clear() { this.map.clear(); }
   }
 
-  /** Fast content hash of a canvas, used only as a cache key. */
   async function frameKey(canvas, extra) {
     const { canvas: small } = (() => {
       const c = new OffscreenCanvas(32, 32);
